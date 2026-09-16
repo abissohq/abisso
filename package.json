@@ -2,9 +2,32 @@
   "name": "abisso",
   "version": "0.0.0",
   "private": true,
+  "type": "module",
   "packageManager": "pnpm@12.4.2",
   "engines": {
     "node": ">=24 <25"
   },
-  "scripts": {}
+  "scripts": {
+    "dev": "node tooling/dev.ts",
+    "db:up": "docker compose up -d --wait postgres",
+    "db:migrate": "node tooling/migrate.ts",
+    "dev:bootstrap": "node tooling/bootstrap.ts",
+    "api": "node apps/backend/main.ts",
+    "worker": "node apps/worker/main.ts",
+    "demo:capability": "node tooling/demo.ts",
+    "typecheck": "tsc",
+    "test:m0:ingestion-foundation": "node tooling/test.ts tests/ingestion-foundation.test.ts",
+    "test": "node tooling/test.ts"
+  },
+  "dependencies": {
+    "canonicalize": "^5.0.0",
+    "pg": "^8.23.0",
+    "uuid": "^14.0.2",
+    "zod": "^4.6.5"
+  },
+  "devDependencies": {
+    "@types/node": "^22.20.2",
+    "@types/pg": "^8.23.1",
+    "typescript": "^7.0.2"
+  }
 }
