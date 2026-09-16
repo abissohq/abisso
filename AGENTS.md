@@ -61,3 +61,17 @@ Before making a significant architectural change:
 3. Prefer the smallest design that satisfies it.
 4. Add or update tests.
 5. Record a new architectural decision only when the existing specifications do not already decide it.
+
+## Agent skills
+
+### Issue tracker
+
+Issues are tracked in GitHub Issues for `abissohq/abisso`. See `docs/agents/issue-tracker.md`.
+
+### Triage labels
+
+Triage uses the five default canonical labels. See `docs/agents/triage-labels.md`.
+
+### Domain docs
+
+Domain documentation uses a single-context layout. See `docs/agents/domain.md`.
