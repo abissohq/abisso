@@ -1,10 +1,10 @@
 # Issue tracker: GitHub
 
-Issues and specs for this repo live as GitHub issues. Use the `gh` CLI for all operations.
+Engineering work items are tracked in GitHub Issues. The six authoritative product and engineering specifications remain under `docs/product/` and `docs/architecture/`.
 
 ## Conventions
 
-- **Create an issue**: `gh issue create --title "..." --body "..."`.
+- **Create an issue**: `gh issue create --title "..." --body "..."`
 - **Read an issue**: `gh issue view <number> --comments`, also fetching labels.
 - **List issues**: use `gh issue list` with appropriate state and label filters.
 - **Comment on an issue**: `gh issue comment <number> --body "..."`

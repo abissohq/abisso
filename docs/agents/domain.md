@@ -41,13 +41,22 @@ This repository uses a single-context layout:
 ├── apps/
 └── packages/
 ```
-Use the glossary's vocabulary
-When output names a domain concept—in an issue title, proposal, hypothesis, specification, or test—use the term defined in CONTEXT.md when present and stay consistent with the authoritative specifications.
+
+## Use the glossary's vocabulary
+
+When output names a domain concept—in an issue title, proposal, hypothesis, specification, or test—use the term defined in `CONTEXT.md` when present and stay consistent with the authoritative specifications.
+
 Do not drift to synonyms that change product meaning.
+
 If a needed concept is missing, note the gap for domain modeling rather than inventing a competing term.
-Flag conflicts
+
+## Flag conflicts
+
 If proposed work contradicts:
+
 - an authoritative specification, or
 - an existing ADR,
+
 surface the conflict explicitly rather than silently overriding the decision.
+
 If a new implementation decision is not already resolved by the specifications, document it through the ADR process when appropriate.
