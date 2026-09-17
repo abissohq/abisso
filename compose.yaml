@@ -1,0 +1,18 @@
+services:
+  postgres:
+    image: postgres:17.6
+    environment:
+      POSTGRES_USER: abisso_dev
+      POSTGRES_PASSWORD: abisso_local_only
+      POSTGRES_DB: abisso_dev
+    ports:
+      - "127.0.0.1:55432:5432"
+    volumes:
+      - postgres-data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U abisso_dev -d abisso_dev"]
+      interval: 1s
+      timeout: 5s
+      retries: 30
+volumes:
+  postgres-data:
