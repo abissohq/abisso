@@ -6,6 +6,7 @@ import { spawn } from 'node:child_process';
 import { v7 } from 'uuid';
 import { createHash } from 'node:crypto';
 import { gzipSync } from 'node:zlib';
+import { createServer } from 'node:http';
 import pg from 'pg';
 import { migrate } from '../packages/database/database.ts';
 import { bootstrapSynthetic } from '../packages/database/bootstrap.ts';
@@ -48,6 +49,128 @@ async function post(body: unknown, credential = token) {
     body: typeof body === 'string' ? body : JSON.stringify(body),
   });
 }
+
+for (const timestamp of ['0000-01-01T00:00:00Z', '2026-09-16T12:00:00+16:00']) {
+  test(`${timestamp} receives durable event rejection without rolling back a valid sibling`, async () => {
+    const batch = capabilityBatch();
+    batch.events[0].occurred_at = timestamp;
+    const valid = capabilityBatch(2).events[0];
+    batch.events.push(valid);
+    const first = await post(batch);
+    assert.equal(first.status, 200);
+    const text = await first.text();
+    const result = JSON.parse(text);
+    assert.deepEqual(result.results, [
+      { event_id: batch.events[0].event_id, disposition: 'rejected', reason_code: 'timestamp_invalid' },
+      { event_id: valid.event_id, disposition: 'accepted' },
+    ]);
+    assert.equal(result.checkpoints[0].highest_durable_sequence, 2);
+    const retry = await post(batch);
+    assert.equal(retry.status, 200);
+    assert.equal(await retry.text(), text);
+    const newRequest = await post({ ...batch, request_id: v7() });
+    assert.equal(newRequest.status, 200);
+    assert.deepEqual((await newRequest.json()).results, [result.results[0], { event_id: valid.event_id, disposition: 'duplicate' }]);
+    assert.equal((await db.query('SELECT * FROM telemetry_event_dispositions')).rowCount, 2);
+    assert.equal((await db.query('SELECT event_id FROM canonical_event_ledger')).rows[0].event_id, valid.event_id);
+    assert.equal((await db.query('SELECT * FROM canonical_event_ledger')).rowCount, 1);
+    assert.equal((await db.query('SELECT * FROM projection_jobs')).rowCount, 1);
+  });
+}
+
+async function runCapabilityDemo(port: number) {
+  const demo = spawn(process.execPath, ['tooling/demo.ts'], {
+    env: { ...process.env, NODE_ENV: 'test', DATABASE_URL: process.env.TEST_DATABASE_URL, PGOPTIONS: `-c search_path=${schema}`, PORT: String(port) },
+    stdio: ['ignore', 'pipe', 'pipe'],
+  });
+  let output = '';
+  demo.stdout.on('data', chunk => { output += chunk; });
+  demo.stderr.on('data', chunk => { output += chunk; });
+  const [code] = await once(demo, 'exit');
+  return { code, output };
+}
+
+test('capability demo fails when HTTP 200 contains an event rejection', async () => {
+  // Keep authenticated authority usable while making the synthetic provider claim disagree.
+  await db.query("UPDATE sources SET provider = 'codex'");
+  const result = await runCapabilityDemo(Number(new URL(url).port));
+  assert.equal(result.code, 1);
+  assert.match(result.output, /capability_demo_failed/);
+  assert.equal((await db.query('SELECT * FROM canonical_event_ledger')).rowCount, 0);
+});
+
+test('capability demo fails when an accepted response has no durable capability result', async () => {
+  // An HTTP boundary stub claims acceptance and exact replay without writing PostgreSQL.
+  const acknowledgment = createServer(async (request, response) => {
+    const chunks: Buffer[] = [];
+    for await (const chunk of request) chunks.push(chunk);
+    const batch = JSON.parse(Buffer.concat(chunks).toString());
+    response.writeHead(200, { 'content-type': 'application/json' }).end(JSON.stringify({
+      request_id: batch.request_id,
+      results: [{ event_id: batch.events[0].event_id, disposition: 'accepted' }],
+      checkpoints: [],
+    }));
+  });
+  acknowledgment.listen(0, '127.0.0.1');
+  await once(acknowledgment, 'listening');
+  try {
+    const address = acknowledgment.address();
+    assert(address && typeof address === 'object');
+    const result = await runCapabilityDemo(address.port);
+    assert.equal(result.code, 1);
+    assert.match(result.output, /capability_demo_failed/);
+  } finally {
+    await new Promise<void>(resolve => acknowledgment.close(() => resolve()));
+  }
+});
+
+test('capability demo verifies durable acceptance with the worker stopped', async () => {
+  const result = await runCapabilityDemo(Number(new URL(url).port));
+  assert.equal(result.code, 0, result.output);
+  assert.match(result.output, /exact_request_replay_verified/);
+  const ledger = (await db.query('SELECT ledger_id, event FROM canonical_event_ledger')).rows;
+  assert.equal(ledger.length, 1);
+  assert.equal(ledger[0].event.event_kind, 'capabilities.declared');
+  assert.equal((await db.query('SELECT ledger_id, status FROM projection_jobs')).rows[0].status, 'pending');
+  const declaration = (await db.query('SELECT ledger_id, declaration_id FROM active_capability_declarations')).rows[0];
+  assert.equal(declaration.ledger_id, ledger[0].ledger_id);
+  assert.equal(declaration.declaration_id, ledger[0].event.payload.declaration_id);
+});
+
+test('normal and PostgreSQL boundary timestamps remain accepted without rewriting', async () => {
+  const timestamps = ['2026-09-16T12:00:00Z', '0001-01-01T00:00:00Z', '2026-09-16T12:00:00+15:59', '2026-09-16T12:00:00-15:59'];
+  for (const [index, timestamp] of timestamps.entries()) {
+    const batch = capabilityBatch(index + 1);
+    batch.events[0].occurred_at = timestamp;
+    const response = await post(batch);
+    assert.equal(response.status, 200);
+    assert.equal((await response.json()).results[0].disposition, 'accepted');
+    const ledger = (await db.query('SELECT event FROM canonical_event_ledger WHERE event_id = $1', [batch.events[0].event_id])).rows[0];
+    assert.equal(ledger.event.occurred_at, timestamp);
+  }
+});
+
+test('valid timestamp representations remain intact and equivalent instants collide when representation changes', async () => {
+  const batch = capabilityBatch();
+  batch.events[0].occurred_at = '2026-09-16T12:00:00+00:00';
+  const first = await post(batch);
+  assert.equal(first.status, 200);
+  assert.equal((await first.json()).results[0].disposition, 'accepted');
+  const ledger = (await db.query('SELECT event FROM canonical_event_ledger')).rows[0];
+  assert.equal(ledger.event.occurred_at, '2026-09-16T12:00:00+00:00');
+  assert.equal((await (await post({ ...batch, request_id: v7() })).json()).results[0].disposition, 'duplicate');
+  const changed = structuredClone(batch);
+  changed.request_id = v7();
+  changed.events[0].occurred_at = '2026-09-16T12:00:00Z';
+  const collision = await post(changed);
+  assert.equal(collision.status, 200);
+  assert.deepEqual((await collision.json()).results[0], {
+    event_id: batch.events[0].event_id, disposition: 'rejected', reason_code: 'event_id_collision',
+  });
+  changed.request_id = batch.request_id;
+  assert.equal((await post(changed)).status, 409);
+  assert.equal((await db.query('SELECT * FROM canonical_event_ledger')).rowCount, 1);
+});
 
 test('Batch A acknowledges durable capability acceptance with the worker stopped', async () => {
   const batch = capabilityBatch();

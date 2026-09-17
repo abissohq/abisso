@@ -4,7 +4,12 @@ export const profileVersion = 'm0-ingestion-foundation-v1';
 export const uuid = z.uuid();
 export const eventId = z.union([z.uuidv7(), z.string().regex(/^(?:evt_)?[0-7][0-9A-HJKMNP-TV-Z]{25}$/)]);
 const opaqueId = z.union([uuid, z.string().regex(/^(?:cap|str|evt)_[0-9A-HJKMNP-TV-Z]{26}$/)]);
-export const timestamp = z.iso.datetime({ offset: true, precision: undefined }).refine(value => Number.isFinite(Date.parse(value)));
+export const timestamp = z.iso.datetime({ offset: true, precision: undefined }).refine(value => {
+  // PostgreSQL input has no year zero and requires offset magnitude below 16 hours.
+  // Validation must preserve the original client string for canonical equivalence.
+  const offset = /[+-](\d{2}):\d{2}$/.exec(value);
+  return !value.startsWith('0000-') && (!offset || Number(offset[1]) < 16) && Number.isFinite(Date.parse(value));
+});
 const version = z.string().max(128).regex(/^\d+\.\d+\.\d+(?:-[a-zA-Z0-9.-]+)?$/);
 const provider = z.enum(['claude_code', 'codex', 'local_collector', 'abisso']);
 const integer = z.number().int().min(0).max(Number.MAX_SAFE_INTEGER);

@@ -62,8 +62,9 @@ pnpm test:m0:ingestion-foundation
 
 The demo issues a cryptographically random 15-minute ingestion credential,
 keeps it in process memory, submits Batch A through `POST /v1/telemetry/batches`,
-verifies an exact request replay, and prints only the safe response and processing
-status. A pending job is expected when the worker has not yet processed it.
+requires an accepted event disposition, verifies an exact request replay and the
+durable ledger/job/active declaration, and prints only the safe response and
+processing status. A pending job is expected when the worker has not yet processed it.
 Every explicit bootstrap revokes earlier synthetic credentials. Entity IDs are
 deterministic; bootstrap does not reactivate disabled authority.
 

@@ -56,7 +56,13 @@ export async function ingest(db: pg.Pool, authorization: string | undefined, inp
       if (raw.workspace_id !== authority.workspace_id || raw.user_id !== authority.user_id || raw.machine_id !== authority.machine_id) reason = 'identity_mismatch';
       else if (raw.schema_version !== '1.0') reason = 'unknown_schema';
       else if (raw.event_kind !== 'capabilities.declared') reason = 'unknown_event_kind';
-      else if (!validation.success) reason = 'invalid_field';
+      else if (!validation.success) {
+        const invalidTimestamp = validation.error.issues.some(issue =>
+          issue.path[0] === 'occurred_at' || issue.path[0] === 'observed_at' ||
+          (issue.path[0] === 'payload' && (issue.path[1] === 'valid_from' || issue.path[1] === 'valid_until')),
+        );
+        reason = invalidTimestamp ? 'timestamp_invalid' : 'invalid_field';
+      }
       else {
         const event = validation.data;
         if (event.source.provider !== source.provider || event.source.adapter_name !== source.adapter_name || event.payload.provider !== source.provider) reason = 'identity_mismatch';

@@ -15,17 +15,29 @@ try {
   const first = await submit();
   if (first.status !== 200) throw new Error('demo_ingestion_failed');
   const response = await first.text();
+  const result = JSON.parse(response);
+  if (result.request_id !== batch.request_id || result.results?.length !== 1 ||
+      result.results[0].event_id !== batch.events[0].event_id || result.results[0].disposition !== 'accepted') {
+    throw new Error('demo_acceptance_failed');
+  }
   console.log(response);
   const retry = await submit();
   if (retry.status !== 200 || await retry.text() !== response) throw new Error('demo_replay_failed');
   console.log('exact_request_replay_verified');
-  // This is an observation, not a worker invocation or an acceptance prerequisite.
-  console.log(JSON.stringify((await db.query(
+  // Durable acceptance includes a ledger fact, its job, and the active declaration.
+  // Worker completion remains an observation, not an acceptance prerequisite.
+  const durable = (await db.query(
     `SELECT l.ledger_id, j.status, p.projector_version FROM canonical_event_ledger l
      JOIN projection_jobs j USING (ledger_id)
+     JOIN active_capability_declarations a ON a.ledger_id = l.ledger_id AND a.source_id = l.source_id
      LEFT JOIN source_capability_projection p ON p.ledger_id = l.ledger_id
-     WHERE l.event_id = $1`, [batch.events[0].event_id],
-  )).rows));
+     WHERE l.event_id = $1 AND l.workspace_id = $2 AND l.source_id = $3
+       AND l.event_kind = 'capabilities.declared' AND a.declaration_id = $4
+       AND l.event->'payload'->>'declaration_id' = $4`,
+    [batch.events[0].event_id, batch.events[0].workspace_id, batch.events[0].source.source_id, batch.events[0].payload.declaration_id],
+  )).rows;
+  if (durable.length !== 1) throw new Error('demo_durable_acceptance_failed');
+  console.log(JSON.stringify(durable));
 } catch {
   console.error('capability_demo_failed');
   process.exitCode = 1;
