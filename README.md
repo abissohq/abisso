@@ -95,3 +95,11 @@ and removes its own isolated schema; development data is not reset.
 
 See [the foundation profile](docs/engineering/ingestion-foundation.md) for the
 implemented contract, test boundaries, and deferred work.
+
+Issue #4 adds browser sign-in and session-start Live. After `pnpm dev`, open
+[Live](http://127.0.0.1:3001), use **Local synthetic sign in**, and submit the two
+login forms. Run `pnpm demo:start` in another terminal, then click **Reread Live**
+to see a Starting session inside its Active provisional Workstream. No production
+credentials are needed. Run `pnpm test:m0:start` for this slice's acceptance suite.
+See [session-start notes](docs/engineering/session-start-live.md) for its exact
+profile, authentication configuration and deferred scope.

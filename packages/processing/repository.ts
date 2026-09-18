@@ -1,5 +1,5 @@
 import type pg from 'pg';
-import type { AcceptedCapabilityEvent } from '../contracts/capability.ts';
+import type { AcceptedEvent } from '../contracts/session.ts';
 import type { projectCapability } from './capabilities.ts';
 
 export async function claimPendingJob(client: pg.PoolClient) {
@@ -8,7 +8,7 @@ export async function claimPendingJob(client: pg.PoolClient) {
      ORDER BY ledger_id LIMIT 1 FOR UPDATE SKIP LOCKED`,
   )).rows[0];
   if (!job) return undefined;
-  const ledger = (await client.query<{ event: AcceptedCapabilityEvent }>('SELECT event FROM canonical_event_ledger WHERE ledger_id = $1', [job.ledger_id])).rows[0];
+  const ledger = (await client.query<{ event: AcceptedEvent }>('SELECT event FROM canonical_event_ledger WHERE ledger_id = $1', [job.ledger_id])).rows[0];
   return { ledger_id: job.ledger_id, event: ledger.event };
 }
 

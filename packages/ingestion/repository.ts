@@ -1,5 +1,6 @@
+import type { AcceptedEvent } from '../contracts/session.ts';
 import type pg from 'pg';
-import type { AcceptedCapabilityEvent, Checkpoint } from '../contracts/capability.ts';
+import type { Checkpoint } from '../contracts/capability.ts';
 
 export type EventIdentity = { workspace_id: string; source_id: string; event_id: string };
 
@@ -20,14 +21,14 @@ export async function findDisposition(client: pg.PoolClient, identity: EventIden
   return (await client.query('SELECT * FROM telemetry_event_dispositions WHERE workspace_id = $1 AND source_id = $2 AND event_id = $3', [identity.workspace_id, identity.source_id, identity.event_id])).rows[0];
 }
 
-export async function acceptCapability(client: pg.PoolClient, event: AcceptedCapabilityEvent): Promise<string> {
+export async function acceptEvent(client: pg.PoolClient, event: AcceptedEvent): Promise<string> {
   const ledgerId: string = (await client.query(
-    `INSERT INTO canonical_event_ledger (workspace_id, user_id, machine_id, source_id, stream_id, source_sequence, event_id, schema_version, event_kind, occurred_at, observed_at, received_at, event)
-     VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13) RETURNING ledger_id`,
-    [event.workspace_id, event.user_id, event.machine_id, event.source.source_id, event.source.stream_id, event.source.source_sequence, event.event_id, event.schema_version, event.event_kind, event.occurred_at, event.observed_at, event.received_at, event],
+    `INSERT INTO canonical_event_ledger (workspace_id, user_id, machine_id, source_id, stream_id, source_sequence, event_id, schema_version, event_kind, session_id, occurred_at, observed_at, received_at, event)
+     VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14) RETURNING ledger_id`,
+    [event.workspace_id, event.user_id, event.machine_id, event.source.source_id, event.source.stream_id, event.source.source_sequence, event.event_id, event.schema_version, event.event_kind, 'session_id' in event ? event.session_id : null, event.occurred_at, event.observed_at, event.received_at, event],
   )).rows[0].ledger_id;
   await client.query('INSERT INTO projection_jobs (ledger_id) VALUES ($1)', [ledgerId]);
-  await client.query(
+  if (event.event_kind === 'capabilities.declared') await client.query(
     `INSERT INTO active_capability_declarations VALUES ($1,$2,$3,$4,$5)
      ON CONFLICT (source_id) DO UPDATE SET declaration_id = EXCLUDED.declaration_id, ledger_id = EXCLUDED.ledger_id, valid_from = EXCLUDED.valid_from, valid_until = EXCLUDED.valid_until`,
     [event.source.source_id, event.payload.declaration_id, ledgerId, event.payload.valid_from, event.payload.valid_until ?? null],

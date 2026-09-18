@@ -1,3 +1,4 @@
+import { projectSessionStart } from './sessions.ts';
 import type pg from 'pg';
 import { transaction } from '../database/database.ts';
 import { projectCapability } from './capabilities.ts';
@@ -9,7 +10,11 @@ export async function processNext(db: pg.Pool): Promise<boolean> {
   return transaction(db, async client => {
     const job = await claimPendingJob(client);
     if (!job) return false;
-    await completeCapabilityJob(client, projectCapability(job.ledger_id, job.event));
+    if (job.event.event_kind === 'capabilities.declared') await completeCapabilityJob(client, projectCapability(job.ledger_id, job.event));
+    else {
+      await projectSessionStart(client, job.ledger_id, job.event);
+      await client.query("UPDATE projection_jobs SET status='completed', completed_at=clock_timestamp() WHERE ledger_id=$1", [job.ledger_id]);
+    }
     return true;
   });
 }

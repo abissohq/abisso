@@ -1,3 +1,6 @@
+import { readFile } from 'node:fs/promises';
+import { beginLogin, syntheticLogin, sessionCookie } from '../../packages/browser/authentication.ts';
+import { readLive } from '../../packages/live/read.ts';
 import { createServer } from 'node:http';
 import { gunzipSync } from 'node:zlib';
 import type pg from 'pg';
@@ -5,11 +8,58 @@ import { RequestFailure } from '../../packages/contracts/capability.ts';
 import { ingest } from '../../packages/ingestion/ingest.ts';
 import { limits, parseCanonicalJson } from '../../packages/contracts/json.ts';
 
-export function createApi(db: pg.Pool) {
+export function createApi(db: pg.Pool, options: { environment?: string; origin?: string; secureCookies?: boolean } = {}) {
   const server = createServer(async (request, response) => {
     response.setHeader('content-type', 'application/json');
     response.setHeader('cache-control', 'no-store');
+    response.setHeader('x-content-type-options', 'nosniff');
+    response.setHeader('referrer-policy', 'no-referrer');
+    response.setHeader('content-security-policy', "default-src 'self'; frame-ancestors 'none'; form-action 'self'");
     try {
+      const path = new URL(request.url!, 'http://localhost');
+      if (request.method === 'GET' && request.url === '/') {
+        response.setHeader('content-type', 'text/html; charset=utf-8');
+        response.end('<!doctype html><html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>Abisso Live</title></head><body><div id="root"></div><script src="/assets/live.js" defer></script></body></html>');
+        return;
+      }
+      if (request.method === 'GET' && request.url === '/assets/live.js') {
+        response.setHeader('content-type', 'text/javascript; charset=utf-8');
+        response.end(await readFile(new URL('../web/dist/live.js', import.meta.url)));
+        return;
+      }
+      if (request.method === 'GET' && path.pathname === '/v1/live') {
+        response.end(JSON.stringify(await readLive(db, request.headers.cookie, path.searchParams.get('workspace_id'))));
+        return;
+      }
+      if (['development', 'test'].includes(options.environment ?? '') && path.pathname.startsWith('/dev/login') && !path.search) {
+        if (request.method === 'GET' && path.pathname === '/dev/login') {
+          const login = await beginLogin(db);
+          response.setHeader('set-cookie', sessionCookie(login.token, options.secureCookies ?? false, 900));
+          response.setHeader('content-type', 'text/html; charset=utf-8');
+          response.end(`<!doctype html><html lang="en"><head><meta charset="utf-8"><title>Abisso local sign in</title></head><body><form id="login" method="post" action="/dev/login/code"><input type="hidden" name="csrf" value="${login.csrf}"><button>Issue local login code</button></form><p id="login-error" role="alert"></p><script src="/assets/live.js" defer></script></body></html>`);
+          return;
+        }
+        if (request.method === 'POST' && ['/dev/login/code', '/dev/login/exchange'].includes(path.pathname)) {
+          const origin = options.origin ?? `http://${request.headers.host}`;
+          if (request.headers.origin !== origin) throw new RequestFailure(403, 'origin_invalid');
+          if (request.headers['content-type']?.split(';')[0] !== 'application/x-www-form-urlencoded') throw new RequestFailure(400, 'invalid_form');
+          let body = '';
+          for await (const chunk of request) { body += chunk; if (Buffer.byteLength(body) > 1024) throw new RequestFailure(413, 'hard_limit'); }
+          const form = new URLSearchParams(body);
+          const result = await syntheticLogin(db, request.headers.cookie, form.get('csrf') ?? '', path.pathname.endsWith('/exchange') ? form.get('code') ?? '' : undefined);
+          if ('token' in result && result.token) response.setHeader('set-cookie', sessionCookie(result.token, options.secureCookies ?? false));
+          if (request.headers.accept?.includes('text/html')) {
+            if ('code' in result) {
+              response.setHeader('content-type', 'text/html; charset=utf-8');
+              response.end(`<form method="post" action="/dev/login/exchange"><input type="hidden" name="csrf" value="${(form.get('csrf') ?? '').replaceAll('&', '&amp;').replaceAll('\"', '&quot;').replaceAll('<', '&lt;').replaceAll('>', '&gt;')}"><input type="hidden" name="code" value="${result.code}"><button>Sign in to synthetic workspace</button></form>`);
+            } else response.writeHead(303, { location: '/' }).end();
+            return;
+          }
+          response.end(JSON.stringify('code' in result ? { code: result.code } : { csrf: result.csrf }));
+          return;
+        }
+      }
+
       if (request.method !== 'POST' || request.url !== '/v1/telemetry/batches') throw new RequestFailure(404, 'not_found');
       if (request.headers['content-type']?.split(';')[0].trim() !== 'application/json') throw new RequestFailure(400, 'malformed_wrapper');
       const encoding = request.headers['content-encoding'];

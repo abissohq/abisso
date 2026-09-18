@@ -24,13 +24,16 @@ export async function transaction<T>(db: pg.Pool, run: (client: pg.PoolClient) =
 }
 
 export async function migrate(db: pg.Pool) {
-  const sql = await readFile(new URL('./001-ingestion.sql', import.meta.url), 'utf8');
+  const migrations = ['001-ingestion.sql', '002-session-start.sql'];
   await transaction(db, async client => {
     await client.query("SELECT pg_advisory_xact_lock(182305, 1)");
     await client.query('CREATE TABLE IF NOT EXISTS schema_migrations (version integer PRIMARY KEY)');
-    if (!(await client.query('SELECT 1 FROM schema_migrations WHERE version = 1')).rowCount) {
-      await client.query(sql);
-      await client.query('INSERT INTO schema_migrations VALUES (1)');
+    for (const [index, path] of migrations.entries()) {
+      const version = index + 1;
+      if (!(await client.query('SELECT 1 FROM schema_migrations WHERE version = $1', [version])).rowCount) {
+        await client.query(await readFile(new URL(path, import.meta.url), 'utf8'));
+        await client.query('INSERT INTO schema_migrations VALUES ($1)', [version]);
+      }
     }
   });
 }
