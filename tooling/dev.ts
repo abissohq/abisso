@@ -1,3 +1,4 @@
+import { buildWeb } from './build-web.ts';
 import { fork, spawnSync } from 'node:child_process';
 import { database, localDatabaseUrl, migrate } from '../packages/database/database.ts';
 import { bootstrapSynthetic } from '../packages/database/bootstrap.ts';
@@ -18,6 +19,7 @@ try {
   await db.end();
 }
 if (process.exitCode) process.exit(process.exitCode);
+await buildWeb();
 const children = ['apps/backend/main.ts', 'apps/worker/main.ts'].map(path => fork(path, [], { stdio: 'inherit' }));
 let stopping = false;
 function stop() {

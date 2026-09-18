@@ -9,7 +9,7 @@ const db = database();
 try {
   do {
     const processed = await processNext(db);
-    if (process.argv.includes('--once')) break;
+    if (process.argv.includes('--once') || (process.argv.includes('--drain') && !processed)) break;
     if (!processed) await setTimeout(250);
   } while (!stopping);
 } catch {

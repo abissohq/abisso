@@ -4,7 +4,7 @@ import { createApi } from './api.ts';
 const port = Number(process.env.PORT ?? 3001);
 if (!Number.isInteger(port) || port < 1 || port > 65535) throw new Error('invalid_port');
 const db = database();
-const server = createApi(db);
+const server = createApi(db, { environment: process.env.NODE_ENV, origin: process.env.APP_ORIGIN ?? `http://127.0.0.1:${port}`, secureCookies: process.env.NODE_ENV === 'production' || process.env.COOKIE_SECURE === 'true' });
 server.on('error', async () => {
   console.error('api_failed');
   await db.end();
