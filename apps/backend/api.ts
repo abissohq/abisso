@@ -7,9 +7,12 @@ import type pg from 'pg';
 import { RequestFailure } from '../../packages/contracts/capability.ts';
 import { ingest } from '../../packages/ingestion/ingest.ts';
 import { limits, parseCanonicalJson } from '../../packages/contracts/json.ts';
+import { purgeExpiredQuarantine } from '../../packages/ingestion/quarantine-repository.ts';
 
 export function createApi(db: pg.Pool, options: { environment?: string; origin?: string; secureCookies?: boolean } = {}) {
+  let ingesting = 0;
   const server = createServer(async (request, response) => {
+    let admitted = false;
     response.setHeader('content-type', 'application/json');
     response.setHeader('cache-control', 'no-store');
     response.setHeader('x-content-type-options', 'nosniff');
@@ -61,6 +64,13 @@ export function createApi(db: pg.Pool, options: { environment?: string; origin?:
       }
 
       if (request.method !== 'POST' || request.url !== '/v1/telemetry/batches') throw new RequestFailure(404, 'not_found');
+      // Bound work before buffering input; no unbounded per-IP identity map.
+      if (ingesting >= 8) {
+        request.resume();
+        throw new RequestFailure(429, 'admission_limit');
+      }
+      ingesting++;
+      admitted = true;
       if (request.headers['content-type']?.split(';')[0].trim() !== 'application/json') throw new RequestFailure(400, 'malformed_wrapper');
       const encoding = request.headers['content-encoding'];
       if (encoding && encoding !== 'identity' && encoding !== 'gzip') throw new RequestFailure(400, 'unsupported_encoding');
@@ -80,13 +90,22 @@ export function createApi(db: pg.Pool, options: { environment?: string; origin?:
       try { text = new TextDecoder('utf-8', { fatal: true }).decode(buffer); }
       catch { throw new RequestFailure(400, 'invalid_json'); }
       const body = parseCanonicalJson(text);
-      const result = await ingest(db, request.headers.authorization, body);
+      const result = await ingest(db, request.headers.authorization, body, { environment: options.environment });
       response.writeHead(result.status).end(result.body);
     } catch (error) {
       const failure = error instanceof RequestFailure ? error : new RequestFailure(500, 'internal_error');
       response.writeHead(failure.status).end(JSON.stringify({ error: failure.code }));
+    } finally {
+      if (admitted) ingesting--;
     }
   });
   server.requestTimeout = 10_000;
+  if (['development', 'test'].includes(options.environment ?? '')) {
+    const purge = () => { void purgeExpiredQuarantine(db).catch(() => { console.error('quarantine_cleanup_failed'); }); };
+    const cleanup = setInterval(purge, 60_000);
+    cleanup.unref();
+    server.on('listening', purge);
+    server.on('close', () => clearInterval(cleanup));
+  }
   return server;
 }

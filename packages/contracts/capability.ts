@@ -74,7 +74,7 @@ export const batchWrapper = z.strictObject({
   events: z.array(z.record(z.string(), z.unknown())).min(1).max(200),
 });
 export type Batch = z.infer<typeof batchWrapper>;
-export type EventResult = { event_id: string; disposition: 'accepted' | 'duplicate' | 'rejected'; reason_code?: string };
+export type EventResult = { event_id: string; disposition: 'accepted' | 'duplicate' | 'rejected' | 'quarantined'; reason_code?: string };
 export type Checkpoint = { source_id: string; stream_id: string; highest_durable_sequence: number };
 
 export class RequestFailure extends Error {

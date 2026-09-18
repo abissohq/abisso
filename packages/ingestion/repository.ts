@@ -37,13 +37,14 @@ export async function acceptEvent(client: pg.PoolClient, event: AcceptedEvent): 
 }
 
 export async function saveDisposition(client: pg.PoolClient, outcome: EventIdentity & {
-  digest: string; disposition: 'accepted' | 'rejected'; reason_code: string | null;
+  digest: string; disposition: 'accepted' | 'rejected' | 'quarantined'; reason_code: string | null;
+  quarantine_id: string | null;
   ledger_id: string | null; stream_id: string | null; source_sequence: number | null;
 }) {
   await client.query(
-    `INSERT INTO telemetry_event_dispositions (workspace_id, source_id, event_id, digest, disposition, reason_code, ledger_id, stream_id, source_sequence)
-     VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9)`,
-    [outcome.workspace_id, outcome.source_id, outcome.event_id, outcome.digest, outcome.disposition, outcome.reason_code, outcome.ledger_id, outcome.stream_id, outcome.source_sequence],
+    `INSERT INTO telemetry_event_dispositions (workspace_id, source_id, event_id, digest, disposition, reason_code, ledger_id, stream_id, source_sequence, quarantine_id)
+     VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10)`,
+    [outcome.workspace_id, outcome.source_id, outcome.event_id, outcome.digest, outcome.disposition, outcome.reason_code, outcome.ledger_id, outcome.stream_id, outcome.source_sequence, outcome.quarantine_id],
   );
 }
 
