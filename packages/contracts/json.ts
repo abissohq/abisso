@@ -1,4 +1,5 @@
 import { RequestFailure } from './capability.ts';
+import { syntheticNamespace, syntheticExtensionBytes } from './quarantine.ts';
 
 export const limits = { wireBytes: 512 * 1024, decodedBytes: 1024 * 1024, eventBytes: 64 * 1024 };
 
@@ -78,6 +79,9 @@ export function parseCanonicalJson(text: string): unknown {
       if (typeof result === 'number' && (!Number.isFinite(result) || (Number.isInteger(result) && !Number.isSafeInteger(result)))) fail();
     }
     if (path.length === 2 && path[0] === 'events' && Buffer.byteLength(text.slice(start, cursor)) > limits.eventBytes) limit();
+    if (path.length === 3 && path[0] === 'events' && path[2] === 'extensions' &&
+        result !== null && typeof result === 'object' && Object.hasOwn(result, syntheticNamespace) &&
+        Buffer.byteLength(text.slice(start, cursor)) > syntheticExtensionBytes) limit();
     return result;
   }
   const result = value(0, []);

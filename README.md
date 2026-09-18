@@ -103,3 +103,21 @@ to see a Starting session inside its Active provisional Workstream. No productio
 credentials are needed. Run `pnpm test:m0:start` for this slice's acceptance suite.
 See [session-start notes](docs/engineering/session-start-live.md) for its exact
 profile, authentication configuration and deferred scope.
+
+Issue #5 adds deterministic mixed-batch failure/retry checks and a strictly
+dev/test-only synthetic extension quarantine boundary. The canonical registry
+still contains only `capabilities.declared` and `session.started`. Run:
+
+```sh
+pnpm test:m0:ingestion
+pnpm typecheck
+pnpm test
+```
+
+The ingestion suite demonstrates mixed accepted/duplicate/rejected/quarantined
+outcomes, exact replays, a deferred precommit database failure with no partial
+effects, and concurrent retries. It uses isolated schemas, the normal HTTP API,
+and the separate worker; no fault-injection route is exposed. See
+[mixed-batch notes](docs/engineering/mixed-batch-ingestion.md) for the strict
+extension allowlist, 256-byte limit, restrictions, one-hour payload retention,
+and explicit maintenance command. `pnpm dev` and `pnpm demo:start` remain unchanged.

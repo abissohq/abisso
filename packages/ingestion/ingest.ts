@@ -7,21 +7,31 @@ import { batchWrapper, eventId, sourceSchema, RequestFailure } from '../contract
 import type { Checkpoint, EventResult } from '../contracts/capability.ts';
 import { authenticate } from './authentication.ts';
 import { registeredSources } from './authority-repository.ts';
+import { syntheticExtensions } from '../contracts/quarantine.ts';
+import { purgeExpiredQuarantine, saveQuarantine } from './quarantine-repository.ts';
 import { acceptedReferences, acceptEvent, durableCheckpoint, finalizeRequest, findDisposition, findRequest, saveDisposition, signalCollision } from './repository.ts';
 
 export function digest(value: unknown) {
   return createHash('sha256').update(canonicalize(value)!).digest('hex');
 }
 
-export async function ingest(db: pg.Pool, authorization: string | undefined, input: unknown) {
+function validateEvent(raw: Record<string, unknown>, syntheticEnabled: boolean) {
+  const extension = syntheticEnabled ? syntheticExtensions.safeParse(raw.extensions) : undefined;
+  const validation = canonicalEvent.safeParse(extension?.success ? { ...raw, extensions: {} } : raw);
+  return { extension, validation };
+}
+
+export async function ingest(db: pg.Pool, authorization: string | undefined, input: unknown, options: { environment?: string } = {}) {
   return transaction(db, async client => {
     const authority = await authenticate(client, authorization);
     const sources = await registeredSources(client, authority);
+    const syntheticEnabled = ['development', 'test'].includes(options.environment ?? '');
     const parsed = batchWrapper.safeParse(input);
     if (!parsed.success || parsed.data.events.some(event => !eventId.safeParse(event.event_id).success)) {
       throw new RequestFailure(400, 'malformed_wrapper');
     }
     const batch = parsed.data;
+    if (syntheticEnabled) await purgeExpiredQuarantine(client);
     const requestDigest = digest(input);
     const previousRequest = await findRequest(client, authority.machine_id, batch.request_id);
     if (previousRequest) {
@@ -39,8 +49,8 @@ export async function ingest(db: pg.Pool, authorization: string | undefined, inp
     const usedSources = new Set<string>();
     // Capture eligible evidence once, before inserting any sibling ledger rows.
     const references = batch.events.flatMap(raw => {
-      const parsed = canonicalEvent.safeParse(raw);
-      return parsed.success ? parsed.data.provenance.evidence_refs ?? [] : [];
+      const { validation } = validateEvent(raw, syntheticEnabled);
+      return validation.success ? validation.data.provenance.evidence_refs ?? [] : [];
     });
     const declarations = (await client.query(`SELECT a.*, l.event FROM active_capability_declarations a JOIN canonical_event_ledger l USING (ledger_id) WHERE a.source_id = ANY($1::uuid[])`, [sources.map(source => source.id)])).rows;
     const preBatchReferences = await acceptedReferences(client, authority.workspace_id, references);
@@ -53,7 +63,7 @@ export async function ingest(db: pg.Pool, authorization: string | undefined, inp
         continue;
       }
       usedSources.add(source.id);
-      const validation = canonicalEvent.safeParse(raw);
+      const { extension, validation } = validateEvent(raw, syntheticEnabled);
       let reason: string | undefined;
       if (raw.workspace_id !== authority.workspace_id || raw.user_id !== authority.user_id || raw.machine_id !== authority.machine_id) reason = 'identity_mismatch';
       else if (raw.schema_version !== '1.0') reason = 'unknown_schema';
@@ -96,12 +106,18 @@ export async function ingest(db: pg.Pool, authorization: string | undefined, inp
         continue;
       }
       let ledgerId: string | null = null;
+      let quarantineId: string | null = null;
       if (!reason && validation.success) {
-        const event = { ...validation.data, received_at: now.toISOString() };
-        ledgerId = await acceptEvent(client, event);
+        if (extension?.success) {
+          quarantineId = await saveQuarantine(client, identity, extension.data);
+          reason = 'synthetic_interpretation_required';
+        } else {
+          const event = { ...validation.data, received_at: now.toISOString() };
+          ledgerId = await acceptEvent(client, event);
+        }
       }
-      const disposition = ledgerId ? 'accepted' : 'rejected';
-      await saveDisposition(client, { ...identity, digest: eventDigest, disposition, reason_code: reason ?? null, ledger_id: ledgerId, stream_id: routing.success ? routing.data.stream_id : null, source_sequence: routing.success ? routing.data.source_sequence : null });
+      const disposition = ledgerId ? 'accepted' : quarantineId ? 'quarantined' : 'rejected';
+      await saveDisposition(client, { ...identity, digest: eventDigest, disposition, reason_code: reason ?? null, ledger_id: ledgerId, quarantine_id: quarantineId, stream_id: routing.success ? routing.data.stream_id : null, source_sequence: routing.success ? routing.data.source_sequence : null });
       if (routing.success) streams.set(`${source.id}:${routing.data.stream_id}`, { source_id: source.id, stream_id: routing.data.stream_id });
       results.push({ event_id: id, disposition, ...(reason ? { reason_code: reason } : {}) });
     }
