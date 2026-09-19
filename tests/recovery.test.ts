@@ -135,10 +135,11 @@ test('delayed oldest job does not block a later eligible job and failed projecti
   }
 });
 
-test('dead-lettered start blocks later completion without consuming evidence or invalidating Live', async () => {
+for (const laterKind of ['heartbeat', 'completion'] as const) test(`dead-lettered start blocks later ${laterKind} without consuming evidence or invalidating Live`, async () => {
   const declaration = capabilityBatch(); await submit(declaration);
   const start = sessionStartBatch(declaration.events[0].payload.declaration_id); await submit(start);
-  const completion = sessionCompletionBatch(start.events[0], 3); await submit(completion);
+  const later = laterKind === 'heartbeat' ? heartbeatBatch(start.events[0], 3) : sessionCompletionBatch(start.events[0], 3);
+  await submit(later);
   await processNext(db); // capability declaration
   const workstreamId = v5(`provisional-workstream:v1:${start.events[0].source.source_id}:${start.events[0].event_id}`, start.events[0].workspace_id);
   const listener = new pg.Client({ connectionString: process.env.TEST_DATABASE_URL });
@@ -170,6 +171,7 @@ test('separate completion event preserves session and Workstream identity withou
   const start = sessionStartBatch(declaration.events[0].payload.declaration_id); await submit(start);
   await drain();
   const before = (await db.query('SELECT id, workstream_id, data FROM session_projection')).rows[0];
+  assert.equal(before.data.projector_version, 'm0-session-recovery-v1');
   const completion = sessionCompletionBatch(start.events[0], 3);
   await submit(completion);
   await drain();
@@ -182,6 +184,7 @@ test('separate completion event preserves session and Workstream identity withou
   assert.equal(after.data.latest_evidence_event_id, completion.events[0].event_id);
   assert.equal(after.data.latest_source_contact_at, before.data.latest_source_contact_at);
   assert.equal(workstream.state, 'Active');
+  assert.equal(workstream.projector_version, 'm0-session-recovery-v1');
   assert.equal(workstream.latest_source_contact_at, before.data.latest_source_contact_at);
   assert.equal(workstream.last_meaningful_update_at, null);
   assert.equal(workstream.outcome, undefined);
