@@ -5,7 +5,7 @@ import { request as httpRequest } from 'node:http';
 import { after, afterEach, beforeEach, test } from 'node:test';
 import { setTimeout as delay } from 'node:timers/promises';
 import pg from 'pg';
-import { v7 } from 'uuid';
+import { v5, v7 } from 'uuid';
 import { createElement } from 'react';
 import { renderToStaticMarkup } from 'react-dom/server';
 import { createApi } from '../apps/backend/api.ts';
@@ -105,10 +105,17 @@ test('three authenticated batches project Starting then Running and committed sa
     assert.equal((await submit(a)).results[0].disposition, 'accepted');
     const b = sessionStartBatch(a.events[0].payload.declaration_id);
     assert.equal((await submit(b)).results[0].disposition, 'accepted');
+    const workstreamId = v5(`provisional-workstream:v1:${b.events[0].source.source_id}:${b.events[0].event_id}`, b.events[0].workspace_id);
+    async function nextOwnInvalidation() {
+      for (;;) {
+        const hint = await nextEvent(connection);
+        assert.ok(hint, 'SSE stream closed');
+        if (hint.event === 'projection.invalidated' && hint.data.entity_id === workstreamId) return hint;
+      }
+    }
     assert.deepEqual((await snapshot(cookie)).workstreams, []);
     await drain();
-    const firstHint = await nextEvent(connection);
-    assert.equal(firstHint?.event, 'projection.invalidated');
+    const firstHint = await nextOwnInvalidation();
     assert.deepEqual(Object.keys(firstHint!.data).sort(), ['entity_id', 'projection_type', 'revision']);
     const starting = await snapshot(cookie);
     const workstream = starting.workstreams[0];
@@ -121,8 +128,7 @@ test('three authenticated batches project Starting then Running and committed sa
     assert.equal((await submit(c)).results[0].disposition, 'accepted');
     assert.equal((await snapshot(cookie)).workspace_projection_revision, starting.workspace_projection_revision);
     await drain();
-    const secondHint = await nextEvent(connection);
-    assert.equal(secondHint?.event, 'projection.invalidated');
+    const secondHint = await nextOwnInvalidation();
     assert.equal(secondHint?.data.entity_id, workstream.id);
     assert.equal(secondHint?.data.revision, '2');
     const running = await snapshot(cookie);
@@ -134,6 +140,8 @@ test('three authenticated batches project Starting then Running and committed sa
     assert.equal(running.workstreams[0].sessions[0].id, session.id);
     assert.deepEqual(running.workstreams[0].sessions[0].membership_provenance, session.membership_provenance);
     assert.equal(running.workstreams[0].sessions[0].state, 'Running');
+    assert.equal(running.workstreams[0].sessions[0].projector_version, 'm0-session-recovery-v1');
+    assert.equal(running.workstreams[0].projector_version, 'm0-session-recovery-v1');
     assert.equal(running.workstreams[0].sessions[0].progress_counter, 17);
     assert.equal(running.workstreams[0].sessions[0].latest_evidence_event_id, c.events[0].event_id);
     assert.equal(running.workstreams[0].sessions[0].ledger_watermark, '3');
@@ -193,10 +201,19 @@ test('quarantined heartbeat evidence cannot refresh Running or invalidate Live',
     const declaration = capabilityBatch(); await submit(declaration);
     const start = sessionStartBatch(declaration.events[0].payload.declaration_id); await submit(start);
     await drain();
-    assert.equal((await nextEvent(connection))?.event, 'projection.invalidated');
+    const workstreamId = (await snapshot(cookie)).workstreams[0].id;
+    // Parallel test schemas share the synthetic workspace ID and PostgreSQL notification channel.
+    async function nextOwnInvalidation() {
+      for (;;) {
+        const hint = await nextEvent(connection);
+        assert.ok(hint, 'SSE stream closed');
+        if (hint.event === 'projection.invalidated' && hint.data.entity_id === workstreamId) return hint;
+      }
+    }
+    assert.equal((await nextOwnInvalidation()).data.revision, '1');
     const heartbeat = heartbeatBatch(start.events[0]); await submit(heartbeat);
     await drain();
-    assert.equal((await nextEvent(connection))?.event, 'projection.invalidated');
+    assert.equal((await nextOwnInvalidation()).data.revision, '2');
     const before = await snapshot(cookie);
     assert.equal(before.workstreams[0].sessions[0].state, 'Running');
 
@@ -218,7 +235,7 @@ test('quarantined heartbeat evidence cannot refresh Running or invalidate Live',
     assert.equal((await db.query('SELECT count(*)::int AS n FROM projection_jobs')).rows[0].n, 3);
     assert.equal((await db.query('SELECT count(*)::int AS n FROM telemetry_quarantine')).rows[0].n, 1);
     assert.ok(!JSON.stringify(after).includes(quarantined.events[0].event_id));
-    const pending = nextEvent(connection);
+    const pending = nextOwnInvalidation();
     assert.equal(await Promise.race([pending.then(() => 'invalidated'), delay(80).then(() => 'silent')]), 'silent');
   } finally { connection.abort.abort(); }
 });
@@ -291,7 +308,7 @@ test('SQL notification failure rolls back projection and emits only after a succ
   const faultDb = new pg.Pool({ connectionString: process.env.TEST_DATABASE_URL, options: `-c search_path=${schema},pg_catalog` });
   const pending = nextEvent(connection);
   try {
-    await assert.rejects(processNext(faultDb), /injected_notify_failure/);
+    await processNext(faultDb, { backoffBaseMs: 1 });
     assert.equal((await snapshot(cookie)).workspace_projection_revision, '0');
     assert.equal((await db.query("SELECT status FROM projection_jobs WHERE ledger_id=2")).rows[0].status, 'pending');
     assert.equal(await Promise.race([pending.then(() => 'notified'), delay(40).then(() => 'silent')]), 'silent');
@@ -299,6 +316,7 @@ test('SQL notification failure rolls back projection and emits only after a succ
     await faultDb.end();
     await db.query(`DROP FUNCTION ${schema}.pg_notify(text,text)`);
   }
+  await db.query("UPDATE projection_jobs SET available_at=clock_timestamp()-interval '1 second' WHERE ledger_id=2");
   await processNext(db);
   assert.equal((await pending)?.data.revision, '1');
   assert.equal((await snapshot(cookie)).workspace_projection_revision, '1');

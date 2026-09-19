@@ -24,9 +24,19 @@ export const sessionActivityEvent = sessionStartedEvent.extend({
     availability: z.literal('available'),
   }),
 });
-export const canonicalEvent = z.discriminatedUnion('event_kind', [capabilityEvent, sessionStartedEvent, sessionActivityEvent]);
+export const sessionCompletedEvent = sessionStartedEvent.extend({
+  event_kind: z.literal('session.completed'),
+  payload: z.strictObject({
+    result: z.literal('completed'),
+    duration_ms: z.number().int().min(0).max(Number.MAX_SAFE_INTEGER).optional(),
+    output_artifact_count: z.number().int().min(0).max(Number.MAX_SAFE_INTEGER).optional(),
+  }),
+});
+export const canonicalEvent = z.discriminatedUnion('event_kind', [capabilityEvent, sessionStartedEvent, sessionActivityEvent, sessionCompletedEvent]);
 export type SessionStartedEvent = z.infer<typeof sessionStartedEvent>;
 export type SessionActivityEvent = z.infer<typeof sessionActivityEvent>;
-export type AcceptedEvent = AcceptedCapabilityEvent | AcceptedSessionStartedEvent | AcceptedSessionActivityEvent;
+export type AcceptedEvent = AcceptedCapabilityEvent | AcceptedSessionStartedEvent | AcceptedSessionActivityEvent | AcceptedSessionCompletedEvent;
 export type AcceptedSessionStartedEvent = Omit<SessionStartedEvent, 'received_at'> & { received_at: string };
 export type AcceptedSessionActivityEvent = Omit<SessionActivityEvent, 'received_at'> & { received_at: string };
+export type SessionCompletedEvent = z.infer<typeof sessionCompletedEvent>;
+export type AcceptedSessionCompletedEvent = Omit<SessionCompletedEvent, 'received_at'> & { received_at: string };

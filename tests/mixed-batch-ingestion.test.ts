@@ -96,7 +96,7 @@ test('unpermitted namespaces, versions, fields and prohibited core content rejec
   for (const change of [
     { payload: { prompt: sentinel } }, { source: { command: sentinel } },
     { privacy: { event_class: 'operational_metadata', policy_version: 'unaccepted-policy' } },
-    { event_kind: 'session.waiting_for_human' }, { event_kind: 'tool.started' }, { event_kind: 'session.completed' },
+    { event_kind: 'session.waiting_for_human' }, { event_kind: 'tool.started' },
   ]) {
     const batch = quarantineBatch();
     const response = await post({ ...batch, events: [{ ...batch.events[0], ...change }] });

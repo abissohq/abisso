@@ -1,9 +1,9 @@
 import { v5 } from 'uuid';
 import type pg from 'pg';
-import type { AcceptedSessionActivityEvent, AcceptedSessionStartedEvent } from '../contracts/session.ts';
+import type { AcceptedSessionActivityEvent, AcceptedSessionCompletedEvent, AcceptedSessionStartedEvent } from '../contracts/session.ts';
 import { projectionInvalidationChannel } from '../live/realtime-channel.ts';
 
-export const sessionProjectorVersion = 'm0-session-heartbeat-v1';
+export const sessionProjectorVersion = 'm0-session-recovery-v1';
 async function notify(client: pg.PoolClient, workspace_id: string, entity_id: string, revision: string) {
   await client.query('SELECT pg_notify($1,$2)', [projectionInvalidationChannel, JSON.stringify({ workspace_id, projection_type: 'workstream', entity_id, revision: String(revision) })]);
 }
@@ -47,7 +47,7 @@ export async function projectSessionHeartbeat(client: pg.PoolClient, ledgerId: s
   const row = (await client.query<{ workstream_id: string; ledger_watermark: string; data: Record<string, unknown> }>(
     'SELECT workstream_id, ledger_watermark, data FROM session_projection WHERE workspace_id=$1 AND id=$2 FOR UPDATE', [event.workspace_id, event.session_id],
   )).rows[0];
-  if (!row || BigInt(row.ledger_watermark) >= BigInt(ledgerId)) return;
+  if (!row || BigInt(row.ledger_watermark) >= BigInt(ledgerId) || row.data.state === 'Completed') return;
   // The emitted counter is evidence from the source, never a server increment.
   // Ledger acceptance order is not source chronology for offline delivery, so
   // this projector does not infer progress or repair a source's counter.
@@ -59,5 +59,22 @@ export async function projectSessionHeartbeat(client: pg.PoolClient, ledgerId: s
     JSON.stringify({ ...evidence, state: 'Running', progress_counter: event.payload.progress_counter })]);
   await client.query(`UPDATE workstream_projection SET revision=$3, ledger_watermark=$4,
     data=data || $5::jsonb WHERE workspace_id=$1 AND id=$2`, [event.workspace_id, row.workstream_id, revision, ledgerId, JSON.stringify(evidence)]);
+  await notify(client, event.workspace_id, row.workstream_id, revision);
+}
+
+export async function projectSessionCompletion(client: pg.PoolClient, ledgerId: string, event: AcceptedSessionCompletedEvent) {
+  await client.query('SELECT revision FROM workspace_projection_revisions WHERE workspace_id=$1 FOR UPDATE', [event.workspace_id]);
+  const row = (await client.query<{ workstream_id: string; ledger_watermark: string; data: { state: string } }>(
+    'SELECT workstream_id, ledger_watermark, data FROM session_projection WHERE workspace_id=$1 AND id=$2 FOR UPDATE', [event.workspace_id, event.session_id],
+  )).rows[0];
+  if (!row || BigInt(row.ledger_watermark) >= BigInt(ledgerId) || row.data.state === 'Completed') return;
+  const revision = (await client.query('UPDATE workspace_projection_revisions SET revision=revision+1 WHERE workspace_id=$1 RETURNING revision', [event.workspace_id])).rows[0].revision;
+  const evidence = { latest_evidence_event_id: event.event_id, latest_observed_at: event.observed_at,
+    latest_received_at: event.received_at, projector_version: sessionProjectorVersion };
+  await client.query(`UPDATE session_projection SET revision=$3, ledger_watermark=$4, data=data || $5::jsonb
+    WHERE workspace_id=$1 AND id=$2`, [event.workspace_id, event.session_id, revision, ledgerId,
+    JSON.stringify({ ...evidence, state: 'Completed', completed_at: event.occurred_at })]);
+  await client.query(`UPDATE workstream_projection SET revision=$3, ledger_watermark=$4, data=data || $5::jsonb
+    WHERE workspace_id=$1 AND id=$2`, [event.workspace_id, row.workstream_id, revision, ledgerId, JSON.stringify(evidence)]);
   await notify(client, event.workspace_id, row.workstream_id, revision);
 }
