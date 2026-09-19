@@ -15,6 +15,7 @@ import { migrate } from '../packages/database/database.ts';
 import { readLive } from '../packages/live/read.ts';
 import { LiveSynchronization } from '../packages/live/synchronization.ts';
 import { processNext } from '../packages/processing/worker.ts';
+import { ingest } from '../packages/ingestion/ingest.ts';
 import { capabilityBatch } from '../packages/test-fixtures/capability.ts';
 import { heartbeatBatch, sessionStartBatch } from '../packages/test-fixtures/session.ts';
 
@@ -275,6 +276,40 @@ test('SSE requires browser authority, correct Origin and workspace scope', async
   assert.equal((await stream(cookie)).response.status, 403);
   const liveSession = await stream(undefined, { authorization: `Bearer ${token}` });
   assert.equal(liveSession.response.status, 401);
+});
+
+test('SSE ignores projection commits from a separate test schema with the same synthetic workspace', async () => {
+  const foreignSchema = `test_${randomUUID().replaceAll('-', '')}`;
+  await admin.query(`CREATE SCHEMA ${foreignSchema}`);
+  const foreignDb = new pg.Pool({ connectionString: process.env.TEST_DATABASE_URL, options: `-c search_path=${foreignSchema}` });
+  let connection: Awaited<ReturnType<typeof stream>> | undefined;
+  try {
+    await migrate(foreignDb);
+    const foreign = await bootstrapSynthetic(foreignDb, 'test');
+    connection = await stream(await login());
+    assert.equal((await nextEvent(connection))?.event, 'stream.ready');
+
+    const foreignCapability = capabilityBatch();
+    const foreignStart = sessionStartBatch(foreignCapability.events[0].payload.declaration_id);
+    assert.equal(foreignStart.events[0].workspace_id, synthetic.workspace);
+    assert.equal(JSON.parse((await ingest(foreignDb, `Bearer ${foreign.token}`, foreignCapability, { environment: 'test' })).body).results[0].disposition, 'accepted');
+    assert.equal(JSON.parse((await ingest(foreignDb, `Bearer ${foreign.token}`, foreignStart, { environment: 'test' })).body).results[0].disposition, 'accepted');
+    while (await processNext(foreignDb)) { /* drain foreign jobs */ }
+    assert.equal((await foreignDb.query('SELECT revision FROM workspace_projection_revisions WHERE workspace_id=$1', [synthetic.workspace])).rows[0].revision, '1');
+
+    const ownCapability = capabilityBatch(); await submit(ownCapability);
+    const ownStart = sessionStartBatch(ownCapability.events[0].payload.declaration_id); await submit(ownStart);
+    assert.equal(ownStart.events[0].workspace_id, synthetic.workspace);
+    await drain();
+    const ownId = v5(`provisional-workstream:v1:${ownStart.events[0].source.source_id}:${ownStart.events[0].event_id}`, ownStart.events[0].workspace_id);
+    assert.deepEqual(await nextEvent(connection), { event: 'projection.invalidated', data: {
+      projection_type: 'workstream', entity_id: ownId, revision: '1',
+    } });
+  } finally {
+    connection?.abort.abort();
+    await foreignDb.end();
+    await admin.query(`DROP SCHEMA ${foreignSchema} CASCADE`);
+  }
 });
 
 test('listener loss closes streams; commits remain readable and reconnect starts a new synchronization', async () => {

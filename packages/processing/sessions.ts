@@ -6,7 +6,8 @@ import { projectionInvalidationChannel } from '../live/realtime-channel.ts';
 export const sessionProjectorVersion = 'm0-session-recovery-v1';
 async function notify(client: pg.PoolClient, workspace_id: string, entity_id: string, revision: string, notifications: boolean) {
   if (!notifications) return;
-  await client.query('SELECT pg_notify($1,$2)', [projectionInvalidationChannel, JSON.stringify({ workspace_id, projection_type: 'workstream', entity_id, revision: String(revision) })]);
+  await client.query('SELECT pg_notify($1, json_build_object(\'schema\', current_schema(), \'workspace_id\', $2::text, \'projection_type\', \'workstream\', \'entity_id\', $3::text, \'revision\', $4::text)::text)',
+    [projectionInvalidationChannel, workspace_id, entity_id, String(revision)]);
 }
 export async function projectSessionStart(client: pg.PoolClient, ledgerId: string, event: AcceptedSessionStartedEvent, notifications = true) {
   // Serialize projection mutation and its coherency fence within this workspace.

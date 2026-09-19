@@ -2,7 +2,7 @@ import pg from 'pg';
 import type { ServerResponse } from 'node:http';
 import { projectionInvalidationChannel } from './realtime-channel.ts';
 
-type Invalidation = { workspace_id: string; projection_type: 'workstream'; entity_id: string; revision: string };
+type Invalidation = { schema: string; workspace_id: string; projection_type: 'workstream'; entity_id: string; revision: string };
 type Subscription = { workspace: string; authorize: () => Promise<unknown> };
 
 export class Realtime {
@@ -28,6 +28,7 @@ export class Realtime {
     if (this.stopped || this.listener) return;
     const applicationName = this.db.options.application_name ? `${this.db.options.application_name}_realtime` : 'abisso_realtime';
     const listener = new pg.Client({ ...this.db.options, application_name: applicationName });
+    let schema: string | null = null;
     let lost = false;
     const disconnect = () => {
       if (lost) return;
@@ -47,7 +48,7 @@ export class Realtime {
       if (message.channel !== projectionInvalidationChannel) return;
       let value: Invalidation;
       try { value = JSON.parse(message.payload ?? ''); } catch { return; }
-      if (value.projection_type !== 'workstream' || !/^[0-9]+$/.test(value.revision)) return;
+      if (value.schema !== schema || value.projection_type !== 'workstream' || !/^[0-9]+$/.test(value.revision)) return;
       const data = JSON.stringify({ projection_type: value.projection_type, entity_id: value.entity_id, revision: value.revision });
       for (const [response, subscription] of this.streams) if (subscription.workspace === value.workspace_id) {
         void subscription.authorize().then(() => {
@@ -57,6 +58,7 @@ export class Realtime {
     });
     try {
       await listener.connect();
+      schema = (await listener.query<{ schema: string }>('SELECT current_schema() AS schema')).rows[0].schema;
       await listener.query(`LISTEN ${projectionInvalidationChannel}`);
       if (this.stopped || lost) { disconnect(); return; }
       this.listener = listener;
