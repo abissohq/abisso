@@ -3,6 +3,16 @@ import type pg from 'pg';
 import { transaction } from '../database/database.ts';
 import { projectCapability } from './capabilities.ts';
 import { claimPendingJob, completeCapabilityJob, completeJob, failJob, ownsLease } from './repository.ts';
+import type { AcceptedEvent } from '../contracts/session.ts';
+
+// Both live jobs and isolated replay use this versioned projection dispatch.
+export async function projectAcceptedEvent(client: pg.PoolClient, ledgerId: string, event: AcceptedEvent, notifications = true) {
+  if (event.event_kind === 'capabilities.declared') await completeCapabilityJob(client, projectCapability(ledgerId, event));
+  else if (event.event_kind === 'session.started') await projectSessionStart(client, ledgerId, event, notifications);
+  else if (event.event_kind === 'session.activity') await projectSessionHeartbeat(client, ledgerId, event, notifications);
+  else if (event.event_kind === 'session.completed') await projectSessionCompletion(client, ledgerId, event, notifications);
+  else throw new Error('unsupported_projection');
+}
 
 export type WorkerOptions = { leaseMs?: number; backoffBaseMs?: number };
 export async function processNext(db: pg.Pool, options: WorkerOptions = {}): Promise<boolean> {
@@ -14,11 +24,7 @@ export async function processNext(db: pg.Pool, options: WorkerOptions = {}): Pro
   try {
     await transaction(db, async client => {
       if (!await ownsLease(client, job)) return;
-      if (job.event.event_kind === 'capabilities.declared') await completeCapabilityJob(client, projectCapability(job.ledger_id, job.event));
-      else if (job.event.event_kind === 'session.started') await projectSessionStart(client, job.ledger_id, job.event);
-      else if (job.event.event_kind === 'session.activity') await projectSessionHeartbeat(client, job.ledger_id, job.event);
-      else if (job.event.event_kind === 'session.completed') await projectSessionCompletion(client, job.ledger_id, job.event);
-      else throw new Error('unsupported_projection');
+      await projectAcceptedEvent(client, job.ledger_id, job.event);
       await completeJob(client, job);
     });
   } catch {
