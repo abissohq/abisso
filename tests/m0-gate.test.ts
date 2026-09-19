@@ -11,6 +11,7 @@ import { bootstrapSynthetic, synthetic } from '../packages/database/bootstrap.ts
 import { migrate } from '../packages/database/database.ts';
 import { verifyReplay } from '../packages/processing/replay.ts';
 import { processNext } from '../packages/processing/worker.ts';
+import { projectionInvalidationChannel } from '../packages/live/realtime-channel.ts';
 import { capabilityBatch } from '../packages/test-fixtures/capability.ts';
 import { heartbeatBatch, sessionCompletionBatch, sessionStartBatch } from '../packages/test-fixtures/session.ts';
 import { assertSafeFixture, assertTransition, parseSseFrame } from '../tooling/m0-evidence.ts';
@@ -100,15 +101,33 @@ test('M0 measured browser tracer, privacy scan and isolated replay', async () =>
     const b = sessionStartBatch(a.events[0].payload.declaration_id);
     const c = heartbeatBatch(b.events[0]);
     const workstreamId = v5(`provisional-workstream:v1:${b.events[0].source.source_id}:${b.events[0].event_id}`, b.events[0].workspace_id);
+    async function unrelatedInvalidation(revision: string) {
+      await db.query('SELECT pg_notify($1, json_build_object(\'schema\', current_schema(), \'workspace_id\', $2::text, \'projection_type\', \'workstream\', \'entity_id\', \'unrelated-workstream\', \'revision\', $3::text)::text)',
+        [projectionInvalidationChannel, synthetic.workspace, revision]);
+    }
+    async function expectedInvalidation(previousRevision: string) {
+      const skipped = [];
+      for (;;) {
+        const frame = await nextFrame();
+        frames.push(frame);
+        const hint = parseSseFrame(frame);
+        if (hint.event === 'projection.invalidated' && hint.data.projection_type === 'workstream' &&
+            hint.data.entity_id === workstreamId && /^[0-9]+$/.test(hint.data.revision ?? '') &&
+            BigInt(hint.data.revision!) > BigInt(previousRevision)) return { hint, skipped };
+        skipped.push(hint);
+      }
+    }
     for (const batch of [a, b]) { const result = await submit(batch); ack.push(result.duration_ms); responses.push(result.body); }
     const before = await live(); reads.push(before.duration_ms);
     assert.deepEqual(before.body.workstreams, []);
+    await unrelatedInvalidation('1');
     const startProjectionAt = performance.now();
     while (await processNext(db)) { /* drain */ }
     projections.push(performance.now() - startProjectionAt);
     const startDrainFinishedAt = performance.now();
-    frames.push(await nextFrame());
-    const startHint = parseSseFrame(frames.at(-1)!);
+    const { hint: startHint, skipped: skippedStart } = await expectedInvalidation(before.body.workspace_projection_revision);
+    assert.deepEqual(skippedStart.map(hint => [hint.event, hint.data.entity_id, hint.data.revision]),
+      [['projection.invalidated', 'unrelated-workstream', '1']]);
     realtime.push(performance.now() - startDrainFinishedAt);
     endToEndInvalidation.push(performance.now() - startProjectionAt);
     const starting = await live(); reads.push(starting.duration_ms);
@@ -116,24 +135,30 @@ test('M0 measured browser tracer, privacy scan and isolated replay', async () =>
     assert.equal(startHint.data.revision, '1');
     assertTransition(startHint, starting.body, before.body.workspace_projection_revision, workstreamId,
       b.events[0].session_id!, b.events[0].event_id, 'Starting');
+    assert.throws(() => assertTransition(skippedStart[0], starting.body, before.body.workspace_projection_revision,
+      workstreamId, b.events[0].session_id!, b.events[0].event_id, 'Starting'));
     assert.equal(row.state, 'Active');
     assert.equal(row.sessions[0].state, 'Starting');
     assert.equal(row.sessions[0].id, b.events[0].session_id);
     const heartbeat = await submit(c); ack.push(heartbeat.duration_ms); responses.push(heartbeat.body);
     const unchanged = await live(); reads.push(unchanged.duration_ms);
     assert.equal(unchanged.body.workspace_projection_revision, starting.body.workspace_projection_revision);
+    await unrelatedInvalidation('2');
     const heartbeatProjectionAt = performance.now();
     while (await processNext(db)) { /* drain */ }
     projections.push(performance.now() - heartbeatProjectionAt);
     const heartbeatDrainFinishedAt = performance.now();
-    frames.push(await nextFrame());
-    const heartbeatHint = parseSseFrame(frames.at(-1)!);
+    const { hint: heartbeatHint, skipped: skippedHeartbeat } = await expectedInvalidation(starting.body.workspace_projection_revision);
+    assert.deepEqual(skippedHeartbeat.map(hint => [hint.event, hint.data.entity_id, hint.data.revision]),
+      [['projection.invalidated', 'unrelated-workstream', '2']]);
     realtime.push(performance.now() - heartbeatDrainFinishedAt);
     endToEndInvalidation.push(performance.now() - heartbeatProjectionAt);
     const running = await live(); reads.push(running.duration_ms);
     assert.equal(heartbeatHint.data.revision, '2');
     assertTransition(heartbeatHint, running.body, starting.body.workspace_projection_revision, workstreamId,
       b.events[0].session_id!, c.events[0].event_id, 'Running');
+    assert.throws(() => assertTransition(skippedHeartbeat[0], running.body, starting.body.workspace_projection_revision,
+      workstreamId, b.events[0].session_id!, c.events[0].event_id, 'Running'));
     assert.equal(running.body.workstreams[0].id, row.id);
     assert.equal(running.body.workstreams[0].state, 'Active');
     assert.equal(running.body.workstreams[0].sessions[0].id, row.sessions[0].id);
