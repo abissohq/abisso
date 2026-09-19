@@ -117,6 +117,92 @@ test('semantic comparison excludes runtime noise but detects state drift indepen
   await assert.rejects(verifyReplay(db, synthetic.workspace), /unclassified_projection_field/);
 });
 
+test('replay accepts valid out-of-ledger projection commits across independent sessions', async () => {
+  const declaration = capabilityBatch(); await submit(declaration); await drain();
+  const first = sessionStartBatch(declaration.events[0].payload.declaration_id, 2);
+  const second = sessionStartBatch(declaration.events[0].payload.declaration_id, 3);
+  await submit(first); await submit(second);
+  await db.query("UPDATE projection_jobs SET available_at=clock_timestamp()+interval '1 day' WHERE ledger_id=2");
+  assert.equal(await processNext(db), true); // Later eligible session commits first.
+  await db.query("UPDATE projection_jobs SET available_at=clock_timestamp()-interval '1 second' WHERE ledger_id=2");
+  await drain();
+  const result = await verifyReplay(db, synthetic.workspace);
+  assert.equal(result.semantic.equal, true);
+  assert.equal(result.ledger_watermarks.equal, true);
+  assert.equal(result.revisions.live.workspace_revision, result.revisions.replay.workspace_revision);
+  assert.equal(result.revisions.live.sessions.find(([id]) => id === second.events[0].session_id)?.[1], '1');
+  assert.equal(result.revisions.live.sessions.find(([id]) => id === first.events[0].session_id)?.[1], '2');
+  assert.notDeepEqual(result.revisions.live.sessions, result.revisions.replay.sessions);
+  assert.notDeepEqual(result.revisions.live.workstreams, result.revisions.replay.workstreams);
+  assert.equal(result.revisions.equal, true);
+
+  const earlierRevision = (await db.query('SELECT id, workstream_id FROM session_projection WHERE revision=1')).rows[0];
+  await db.query('UPDATE session_projection SET revision=2 WHERE id=$1', [earlierRevision.id]);
+  await db.query('UPDATE workstream_projection SET revision=2 WHERE id=$1', [earlierRevision.workstream_id]);
+  const duplicate = await verifyReplay(db, synthetic.workspace);
+  assert.equal(duplicate.semantic.equal, true);
+  assert.equal(duplicate.ledger_watermarks.equal, true);
+  assert.equal(duplicate.revisions.equal, false);
+  await db.query('UPDATE session_projection SET revision=1 WHERE id=$1', [earlierRevision.id]);
+  await db.query('UPDATE workstream_projection SET revision=1 WHERE id=$1', [earlierRevision.workstream_id]);
+
+  await db.query('UPDATE session_projection SET revision=3 WHERE id=$1', [earlierRevision.id]);
+  await db.query('UPDATE workstream_projection SET revision=3 WHERE id=$1', [earlierRevision.workstream_id]);
+  assert.equal((await verifyReplay(db, synthetic.workspace)).revisions.equal, false);
+  await db.query('UPDATE session_projection SET revision=1 WHERE id=$1', [earlierRevision.id]);
+  await db.query('UPDATE workstream_projection SET revision=1 WHERE id=$1', [earlierRevision.workstream_id]);
+
+  await db.query('UPDATE workspace_projection_revisions SET revision=revision+1 WHERE workspace_id=$1', [synthetic.workspace]);
+  assert.equal((await verifyReplay(db, synthetic.workspace)).revisions.equal, false);
+});
+
+test('replay rejects a row revision earlier than its own effective mutation count', async () => {
+  const declaration = capabilityBatch(); await submit(declaration); await drain();
+  const first = sessionStartBatch(declaration.events[0].payload.declaration_id, 2);
+  const second = sessionStartBatch(declaration.events[0].payload.declaration_id, 3);
+  await submit(first); await submit(second);
+  await submit(heartbeatBatch(first.events[0], 4));
+  await db.query("UPDATE projection_jobs SET available_at=clock_timestamp()+interval '1 day' WHERE ledger_id=2");
+  assert.equal(await processNext(db), true);
+  await db.query("UPDATE projection_jobs SET available_at=clock_timestamp()-interval '1 second' WHERE ledger_id=2");
+  await drain();
+  assert.equal((await verifyReplay(db, synthetic.workspace)).revisions.equal, true);
+
+  const firstRow = (await db.query('SELECT workstream_id FROM session_projection WHERE id=$1', [first.events[0].session_id])).rows[0];
+  const secondRow = (await db.query('SELECT workstream_id FROM session_projection WHERE id=$1', [second.events[0].session_id])).rows[0];
+  await db.query('UPDATE session_projection SET revision=1 WHERE id=$1', [first.events[0].session_id]);
+  await db.query('UPDATE workstream_projection SET revision=1 WHERE id=$1', [firstRow.workstream_id]);
+  await db.query('UPDATE session_projection SET revision=3 WHERE id=$1', [second.events[0].session_id]);
+  await db.query('UPDATE workstream_projection SET revision=3 WHERE id=$1', [secondRow.workstream_id]);
+  const corrupted = await verifyReplay(db, synthetic.workspace);
+  assert.equal(corrupted.semantic.equal, true);
+  assert.equal(corrupted.ledger_watermarks.equal, true);
+  assert.equal(corrupted.revisions.equal, false);
+});
+
+test('replay rejects row revisions that cannot fit the effective mutation schedule', async () => {
+  const declaration = capabilityBatch(); await submit(declaration); await drain();
+  const first = sessionStartBatch(declaration.events[0].payload.declaration_id, 2);
+  const second = sessionStartBatch(declaration.events[0].payload.declaration_id, 3);
+  const third = sessionStartBatch(declaration.events[0].payload.declaration_id, 4);
+  await submit(first); await submit(second); await submit(third);
+  await submit(heartbeatBatch(first.events[0], 5));
+  await submit(heartbeatBatch(second.events[0], 6));
+  await drain();
+  assert.equal((await verifyReplay(db, synthetic.workspace)).revisions.equal, true);
+  for (const [sessionId, revision] of [
+    [first.events[0].session_id, 2], [second.events[0].session_id, 3], [third.events[0].session_id, 5],
+  ] as const) {
+    const row = (await db.query('SELECT workstream_id FROM session_projection WHERE id=$1', [sessionId])).rows[0];
+    await db.query('UPDATE session_projection SET revision=$2 WHERE id=$1', [sessionId, revision]);
+    await db.query('UPDATE workstream_projection SET revision=$2 WHERE id=$1', [row.workstream_id, revision]);
+  }
+  const corrupted = await verifyReplay(db, synthetic.workspace);
+  assert.equal(corrupted.semantic.equal, true);
+  assert.equal(corrupted.ledger_watermarks.equal, true);
+  assert.equal(corrupted.revisions.equal, false);
+});
+
 test('rejected and quarantined input stays outside replay and prohibited text never appears in its result', async () => {
   const declaration = capabilityBatch(); await submit(declaration);
   const quarantineBase = capabilityBatch(2);

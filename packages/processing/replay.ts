@@ -54,6 +54,42 @@ function revisions(snapshot: Snapshot) {
   };
 }
 
+function coherentRevisions(snapshot: Snapshot, mutationCounts: Map<string, bigint>) {
+  // M0 mutates one session/Workstream pair per revision. Commit order across
+  // independent sessions can differ from ledger order, but these fences must
+  // still describe a coherent snapshot of effective mutations.
+  const workspaceRevision = BigInt(snapshot.revision);
+  if (workspaceRevision < 0n || (workspaceRevision === 0n) !== (snapshot.workstreams.length === 0)) return false;
+  const workstreams = new Map(snapshot.workstreams.map(row => [row.id, row]));
+  const currentRevisions = new Set<string>();
+  for (const row of snapshot.workstreams) {
+    const revision = BigInt(row.revision);
+    if (revision < 1n || revision > workspaceRevision || currentRevisions.has(row.revision)) return false;
+    currentRevisions.add(row.revision);
+  }
+  if (snapshot.sessions.length !== snapshot.workstreams.length) return false;
+  if (mutationCounts.size !== snapshot.sessions.length) return false;
+  const referencedWorkstreams = new Set<string>();
+  let totalMutations = 0n;
+  for (const row of snapshot.sessions) {
+    if (!row.workstream_id || referencedWorkstreams.has(row.workstream_id)
+      || workstreams.get(row.workstream_id)?.revision !== row.revision) return false;
+    const mutations = mutationCounts.get(row.id);
+    if (!mutations || BigInt(row.revision) < mutations) return false;
+    totalMutations += mutations;
+    referencedWorkstreams.add(row.workstream_id);
+  }
+  if (totalMutations !== workspaceRevision || (workspaceRevision > 0n && !currentRevisions.has(snapshot.revision))) return false;
+  // By each row's final revision, enough commit slots must exist for every
+  // mutation to rows whose final revision is at or below that fence.
+  let requiredMutations = 0n;
+  for (const row of [...snapshot.sessions].sort((a, b) => BigInt(a.revision) < BigInt(b.revision) ? -1 : 1)) {
+    requiredMutations += mutationCounts.get(row.id)!;
+    if (requiredMutations > BigInt(row.revision)) return false;
+  }
+  return true;
+}
+
 function watermarks(snapshot: Snapshot) {
   return {
     capabilities: snapshot.capabilities.map(row => [row.source_id, row.ledger_id]),
@@ -95,9 +131,21 @@ export async function verifyReplay(db: pg.Pool, workspaceId: string): Promise<Re
       CREATE TEMP TABLE workstream_projection (workspace_id uuid NOT NULL, id uuid NOT NULL, revision bigint NOT NULL, ledger_watermark bigint NOT NULL, data jsonb NOT NULL, PRIMARY KEY (workspace_id,id)) ON COMMIT DROP;
       CREATE TEMP TABLE session_projection (workspace_id uuid NOT NULL, id text NOT NULL, workstream_id uuid NOT NULL, revision bigint NOT NULL, ledger_watermark bigint NOT NULL, data jsonb NOT NULL, PRIMARY KEY (workspace_id,id)) ON COMMIT DROP;
       CREATE TEMP TABLE source_capability_projection (source_id uuid PRIMARY KEY, declaration_id text NOT NULL, ledger_id bigint NOT NULL, projector_version text NOT NULL) ON COMMIT DROP`);
+    const mutationCounts = new Map<string, bigint>();
+    let replayRevision = 0n;
     for (const fact of ledger.rows) {
       if (fact.event.source.source_id !== fact.source_id) throw new Error('ledger_source_mismatch');
       await projectAcceptedEvent(client, fact.ledger_id, fact.event, false);
+      if (fact.event.event_kind !== 'capabilities.declared') {
+        const current = await client.query<{ revision: string }>(
+          'SELECT revision FROM workspace_projection_revisions WHERE workspace_id=$1', [workspaceId],
+        );
+        const nextRevision = BigInt(current.rows[0]?.revision ?? '0');
+        if (nextRevision > replayRevision) {
+          mutationCounts.set(fact.event.session_id, (mutationCounts.get(fact.event.session_id) ?? 0n) + 1n);
+        }
+        replayRevision = nextRevision;
+      }
     }
     const replay = await snapshot(client, workspaceId);
     const liveDigest = digest(semantic(live));
@@ -111,7 +159,11 @@ export async function verifyReplay(db: pg.Pool, workspaceId: string): Promise<Re
       projector_versions: { session: sessionProjectorVersion, capability: capabilityProjectorVersion },
       accepted_event_count: ledger.rows.length,
       semantic: { equal: liveDigest === replayDigest, live_digest: liveDigest, replay_digest: replayDigest },
-      revisions: { equal: digest(liveRevisions) === digest(replayRevisions), live: liveRevisions, replay: replayRevisions },
+      revisions: {
+        equal: live.revision === replay.revision
+          && coherentRevisions(live, mutationCounts) && coherentRevisions(replay, mutationCounts),
+        live: liveRevisions, replay: replayRevisions,
+      },
       ledger_watermarks: { equal: digest(liveWatermarks) === digest(replayWatermarks), live: liveWatermarks, replay: replayWatermarks },
     };
   } catch (error) {
