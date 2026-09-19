@@ -4,10 +4,12 @@ import type { AcceptedSessionActivityEvent, AcceptedSessionCompletedEvent, Accep
 import { projectionInvalidationChannel } from '../live/realtime-channel.ts';
 
 export const sessionProjectorVersion = 'm0-session-recovery-v1';
-async function notify(client: pg.PoolClient, workspace_id: string, entity_id: string, revision: string) {
-  await client.query('SELECT pg_notify($1,$2)', [projectionInvalidationChannel, JSON.stringify({ workspace_id, projection_type: 'workstream', entity_id, revision: String(revision) })]);
+async function notify(client: pg.PoolClient, workspace_id: string, entity_id: string, revision: string, notifications: boolean) {
+  if (!notifications) return;
+  await client.query('SELECT pg_notify($1, json_build_object(\'schema\', current_schema(), \'workspace_id\', $2::text, \'projection_type\', \'workstream\', \'entity_id\', $3::text, \'revision\', $4::text)::text)',
+    [projectionInvalidationChannel, workspace_id, entity_id, String(revision)]);
 }
-export async function projectSessionStart(client: pg.PoolClient, ledgerId: string, event: AcceptedSessionStartedEvent) {
+export async function projectSessionStart(client: pg.PoolClient, ledgerId: string, event: AcceptedSessionStartedEvent, notifications = true) {
   // Serialize projection mutation and its coherency fence within this workspace.
   await client.query('INSERT INTO workspace_projection_revisions (workspace_id) VALUES ($1) ON CONFLICT DO NOTHING', [event.workspace_id]);
   await client.query('SELECT revision FROM workspace_projection_revisions WHERE workspace_id=$1 FOR UPDATE', [event.workspace_id]);
@@ -39,10 +41,10 @@ export async function projectSessionStart(client: pg.PoolClient, ledgerId: strin
   };
   await client.query('INSERT INTO workstream_projection VALUES ($1,$2,$3,$4,$5)', [event.workspace_id, id, revision, ledgerId, workstream]);
   await client.query('INSERT INTO session_projection VALUES ($1,$2,$3,$4,$5,$6)', [event.workspace_id, event.session_id, id, revision, ledgerId, session]);
-  await notify(client, event.workspace_id, id, revision);
+  await notify(client, event.workspace_id, id, revision, notifications);
 }
 
-export async function projectSessionHeartbeat(client: pg.PoolClient, ledgerId: string, event: AcceptedSessionActivityEvent) {
+export async function projectSessionHeartbeat(client: pg.PoolClient, ledgerId: string, event: AcceptedSessionActivityEvent, notifications = true) {
   await client.query('SELECT revision FROM workspace_projection_revisions WHERE workspace_id=$1 FOR UPDATE', [event.workspace_id]);
   const row = (await client.query<{ workstream_id: string; ledger_watermark: string; data: Record<string, unknown> }>(
     'SELECT workstream_id, ledger_watermark, data FROM session_projection WHERE workspace_id=$1 AND id=$2 FOR UPDATE', [event.workspace_id, event.session_id],
@@ -59,10 +61,10 @@ export async function projectSessionHeartbeat(client: pg.PoolClient, ledgerId: s
     JSON.stringify({ ...evidence, state: 'Running', progress_counter: event.payload.progress_counter })]);
   await client.query(`UPDATE workstream_projection SET revision=$3, ledger_watermark=$4,
     data=data || $5::jsonb WHERE workspace_id=$1 AND id=$2`, [event.workspace_id, row.workstream_id, revision, ledgerId, JSON.stringify(evidence)]);
-  await notify(client, event.workspace_id, row.workstream_id, revision);
+  await notify(client, event.workspace_id, row.workstream_id, revision, notifications);
 }
 
-export async function projectSessionCompletion(client: pg.PoolClient, ledgerId: string, event: AcceptedSessionCompletedEvent) {
+export async function projectSessionCompletion(client: pg.PoolClient, ledgerId: string, event: AcceptedSessionCompletedEvent, notifications = true) {
   await client.query('SELECT revision FROM workspace_projection_revisions WHERE workspace_id=$1 FOR UPDATE', [event.workspace_id]);
   const row = (await client.query<{ workstream_id: string; ledger_watermark: string; data: { state: string } }>(
     'SELECT workstream_id, ledger_watermark, data FROM session_projection WHERE workspace_id=$1 AND id=$2 FOR UPDATE', [event.workspace_id, event.session_id],
@@ -76,5 +78,5 @@ export async function projectSessionCompletion(client: pg.PoolClient, ledgerId: 
     JSON.stringify({ ...evidence, state: 'Completed', completed_at: event.occurred_at })]);
   await client.query(`UPDATE workstream_projection SET revision=$3, ledger_watermark=$4, data=data || $5::jsonb
     WHERE workspace_id=$1 AND id=$2`, [event.workspace_id, row.workstream_id, revision, ledgerId, JSON.stringify(evidence)]);
-  await notify(client, event.workspace_id, row.workstream_id, revision);
+  await notify(client, event.workspace_id, row.workstream_id, revision, notifications);
 }
