@@ -1,11 +1,11 @@
 import { v5 } from 'uuid';
 import type pg from 'pg';
 import type { AcceptedSessionActivityEvent, AcceptedSessionStartedEvent } from '../contracts/session.ts';
+import { projectionInvalidationChannel } from '../live/realtime-channel.ts';
 
 export const sessionProjectorVersion = 'm0-session-heartbeat-v1';
-const channel = 'abisso_projection_invalidation';
 async function notify(client: pg.PoolClient, workspace_id: string, entity_id: string, revision: string) {
-  await client.query('SELECT pg_notify($1,$2)', [channel, JSON.stringify({ workspace_id, projection_type: 'workstream', entity_id, revision: String(revision) })]);
+  await client.query('SELECT pg_notify($1,$2)', [projectionInvalidationChannel, JSON.stringify({ workspace_id, projection_type: 'workstream', entity_id, revision: String(revision) })]);
 }
 export async function projectSessionStart(client: pg.PoolClient, ledgerId: string, event: AcceptedSessionStartedEvent) {
   // Serialize projection mutation and its coherency fence within this workspace.

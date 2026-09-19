@@ -1,6 +1,7 @@
 import assert from 'node:assert/strict';
 import { randomUUID } from 'node:crypto';
 import { once } from 'node:events';
+import { request as httpRequest } from 'node:http';
 import { after, afterEach, beforeEach, test } from 'node:test';
 import { setTimeout as delay } from 'node:timers/promises';
 import pg from 'pg';
@@ -29,12 +30,14 @@ beforeEach(async () => {
   db = new pg.Pool({ connectionString: process.env.TEST_DATABASE_URL, options: `-c search_path=${schema}`, application_name: schema });
   await migrate(db);
   ({ token } = await bootstrapSynthetic(db, 'test'));
-  server = createApi(db, { environment: 'test' });
+  const options: { environment: string; origin?: string } = { environment: 'test' };
+  server = createApi(db, options);
   server.listen(0, '127.0.0.1');
   await once(server, 'listening');
   const address = server.address();
   assert(address && typeof address === 'object');
   url = `http://127.0.0.1:${address.port}`;
+  options.origin = url;
 });
 afterEach(async () => {
   server.closeAllConnections();
@@ -69,7 +72,7 @@ async function drain() { while (await processNext(db)) { /* one committed job at
 async function stream(cookie?: string, headers: Record<string, string> = {}) {
   for (let attempt = 0; attempt < 40; attempt++) {
     const abort = new AbortController();
-    const response = await fetch(`${url}/v1/live/events`, { headers: { ...headers, ...(cookie ? { cookie } : {}) }, signal: abort.signal });
+    const response = await fetch(`${url}/v1/live/events`, { headers: { 'sec-fetch-site': 'same-origin', ...headers, ...(cookie ? { cookie } : {}) }, signal: abort.signal });
     if (response.status === 503) { abort.abort(); await delay(25); continue; }
     return { response, abort, reader: response.body?.getReader(), buffer: '' };
   }
@@ -182,16 +185,70 @@ test('freshness is server received evidence recency and deadline crossing does n
   assert.equal((await db.query('SELECT count(*)::int AS n FROM projection_jobs')).rows[0].n, 4);
 });
 
+test('quarantined heartbeat evidence cannot refresh Running or invalidate Live', async () => {
+  const cookie = await login();
+  const connection = await stream(cookie);
+  assert.equal((await nextEvent(connection))?.event, 'stream.ready');
+  try {
+    const declaration = capabilityBatch(); await submit(declaration);
+    const start = sessionStartBatch(declaration.events[0].payload.declaration_id); await submit(start);
+    await drain();
+    assert.equal((await nextEvent(connection))?.event, 'projection.invalidated');
+    const heartbeat = heartbeatBatch(start.events[0]); await submit(heartbeat);
+    await drain();
+    assert.equal((await nextEvent(connection))?.event, 'projection.invalidated');
+    const before = await snapshot(cookie);
+    assert.equal(before.workstreams[0].sessions[0].state, 'Running');
+
+    const candidate = heartbeatBatch(start.events[0], 4);
+    const quarantined = { ...candidate, events: [{ ...candidate.events[0], extensions: {
+      'abisso.synthetic.m0/1': { fixture: 'quarantine', requires_interpretation: true },
+    } }] };
+    const result = await submit(quarantined);
+    assert.deepEqual(result.results.map((item: { disposition: string }) => item.disposition), ['quarantined']);
+    await drain();
+
+    const after = await snapshot(cookie);
+    assert.equal(after.workstreams[0].sessions[0].latest_source_contact_at, before.workstreams[0].sessions[0].latest_source_contact_at);
+    assert.equal(after.workstreams[0].latest_source_contact_at, before.workstreams[0].latest_source_contact_at);
+    assert.equal(after.workspace_projection_revision, before.workspace_projection_revision);
+    assert.equal(after.workstreams[0].sessions[0].state, 'Running');
+    assert.equal(after.workstreams[0].sessions[0].latest_evidence_event_id, heartbeat.events[0].event_id);
+    assert.equal((await db.query('SELECT count(*)::int AS n FROM canonical_event_ledger')).rows[0].n, 3);
+    assert.equal((await db.query('SELECT count(*)::int AS n FROM projection_jobs')).rows[0].n, 3);
+    assert.equal((await db.query('SELECT count(*)::int AS n FROM telemetry_quarantine')).rows[0].n, 1);
+    assert.ok(!JSON.stringify(after).includes(quarantined.events[0].event_id));
+    const pending = nextEvent(connection);
+    assert.equal(await Promise.race([pending.then(() => 'invalidated'), delay(80).then(() => 'silent')]), 'silent');
+  } finally { connection.abort.abort(); }
+});
+
 test('SSE requires browser authority, correct Origin and workspace scope', async () => {
   const cookie = await login();
   assert.equal((await stream()).response.status, 401);
   assert.equal((await stream(undefined, { authorization: `Bearer ${token}` })).response.status, 401);
   assert.equal((await stream(cookie, { origin: 'https://attacker.invalid' })).response.status, 403);
-  const otherWorkspace = await fetch(`${url}/v1/live/events?workspace_id=${randomUUID()}`, { headers: { cookie } });
+  assert.equal((await stream(cookie, { origin: 'null' })).response.status, 403);
+  assert.equal((await stream(cookie, { 'sec-fetch-site': 'cross-site' })).response.status, 403);
+  assert.equal((await fetch(`${url}/v1/live/events`, { headers: { cookie } })).status, 403);
+  const wrongHost = await new Promise<number>((resolve, reject) => {
+    const request = httpRequest(`${url}/v1/live/events`, { headers: { cookie, host: 'attacker.invalid', 'sec-fetch-site': 'same-origin' } }, response => {
+      response.resume();
+      resolve(response.statusCode!);
+    });
+    request.on('error', reject);
+    request.end();
+  });
+  assert.equal(wrongHost, 403);
+  const otherWorkspace = await fetch(`${url}/v1/live/events?workspace_id=${randomUUID()}`, { headers: { cookie, 'sec-fetch-site': 'same-origin' } });
   assert.equal(otherWorkspace.status, 403);
   const allowed = await stream(cookie, { origin: url });
   assert.equal(allowed.response.status, 200);
   assert.equal((await nextEvent(allowed))?.event, 'stream.ready');
+  const noOriginBrowserRequest = await stream(cookie);
+  assert.equal(noOriginBrowserRequest.response.status, 200);
+  assert.equal((await nextEvent(noOriginBrowserRequest))?.event, 'stream.ready');
+  noOriginBrowserRequest.abort.abort();
   const a = capabilityBatch(); await submit(a);
   const b = sessionStartBatch(a.events[0].payload.declaration_id); await submit(b);
   await db.query('UPDATE memberships SET active=false');

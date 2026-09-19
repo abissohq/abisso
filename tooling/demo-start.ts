@@ -27,7 +27,7 @@ try {
   const code = (await (await form('/dev/login/code', { csrf })).json()).code;
   const authenticated = await form('/dev/login/exchange', { csrf, code });
   const browserCookie = authenticated.headers.get('set-cookie')!.split(';')[0];
-  const stream = await fetch(`${url}/v1/live/events`, { headers: { cookie: browserCookie }, signal: streamAbort.signal });
+  const stream = await fetch(`${url}/v1/live/events`, { headers: { cookie: browserCookie, origin: url }, signal: streamAbort.signal });
   if (!stream.ok || !stream.body) throw new Error('stream_failed');
   const reader = stream.body.getReader();
   let buffered = '';

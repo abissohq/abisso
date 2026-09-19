@@ -1,7 +1,7 @@
 import pg from 'pg';
 import type { ServerResponse } from 'node:http';
+import { projectionInvalidationChannel } from './realtime-channel.ts';
 
-const channel = 'abisso_projection_invalidation';
 type Invalidation = { workspace_id: string; projection_type: 'workstream'; entity_id: string; revision: string };
 type Subscription = { workspace: string; authorize: () => Promise<unknown> };
 
@@ -44,7 +44,7 @@ export class Realtime {
     listener.on('error', disconnect);
     listener.on('end', disconnect);
     listener.on('notification', message => {
-      if (message.channel !== channel) return;
+      if (message.channel !== projectionInvalidationChannel) return;
       let value: Invalidation;
       try { value = JSON.parse(message.payload ?? ''); } catch { return; }
       if (value.projection_type !== 'workstream' || !/^[0-9]+$/.test(value.revision)) return;
@@ -57,7 +57,7 @@ export class Realtime {
     });
     try {
       await listener.connect();
-      await listener.query(`LISTEN ${channel}`);
+      await listener.query(`LISTEN ${projectionInvalidationChannel}`);
       if (this.stopped || lost) { disconnect(); return; }
       this.listener = listener;
     } catch { disconnect(); }

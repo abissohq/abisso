@@ -38,7 +38,10 @@ export function createApi(db: pg.Pool, options: { environment?: string; origin?:
       }
       if (request.method === 'GET' && path.pathname === '/v1/live/events') {
         const origin = options.origin ?? `http://${request.headers.host}`;
-        if (request.headers.origin && request.headers.origin !== origin) throw new RequestFailure(403, 'origin_invalid');
+        if (request.headers.host !== new URL(origin).host ||
+          (request.headers.origin === undefined
+            ? request.headers['sec-fetch-site'] !== 'same-origin'
+            : request.headers.origin !== origin)) throw new RequestFailure(403, 'origin_invalid');
         const workspace = await authorizedWorkspace(db, request.headers.cookie, path.searchParams.get('workspace_id'));
         if (!realtime.ready) throw new RequestFailure(503, 'realtime_degraded');
         response.setHeader('content-type', 'text/event-stream; charset=utf-8');
