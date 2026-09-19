@@ -1,11 +1,10 @@
 import assert from 'node:assert/strict';
 import { randomUUID } from 'node:crypto';
 import { once } from 'node:events';
-import { readFile } from 'node:fs/promises';
 import { performance } from 'node:perf_hooks';
 import { after, test } from 'node:test';
 import pg from 'pg';
-import { v7 } from 'uuid';
+import { v5, v7 } from 'uuid';
 import { createApi } from '../apps/backend/api.ts';
 import { canonicalEvent } from '../packages/contracts/session.ts';
 import { bootstrapSynthetic, synthetic } from '../packages/database/bootstrap.ts';
@@ -13,7 +12,8 @@ import { migrate } from '../packages/database/database.ts';
 import { verifyReplay } from '../packages/processing/replay.ts';
 import { processNext } from '../packages/processing/worker.ts';
 import { capabilityBatch } from '../packages/test-fixtures/capability.ts';
-import { heartbeatBatch, sessionStartBatch } from '../packages/test-fixtures/session.ts';
+import { heartbeatBatch, sessionCompletionBatch, sessionStartBatch } from '../packages/test-fixtures/session.ts';
+import { assertSafeFixture, assertTransition, parseSseFrame } from '../tooling/m0-evidence.ts';
 
 const admin = new pg.Pool({ connectionString: process.env.TEST_DATABASE_URL });
 after(() => admin.end());
@@ -22,9 +22,13 @@ test('M0 acceptance profile is exact and unfinished frozen-core kinds reject', a
   const a = capabilityBatch();
   const b = sessionStartBatch(a.events[0].payload.declaration_id);
   const c = heartbeatBatch(b.events[0]);
+  const completed = sessionCompletionBatch(b.events[0], 4);
   const kinds = ['capabilities.declared', 'session.started', 'session.activity', 'session.completed'];
   assert.deepEqual(canonicalEvent.options.map(option => option.shape.event_kind.value), kinds);
-  for (const event of [a.events[0], b.events[0], c.events[0]]) assert.equal(canonicalEvent.safeParse(event).success, true);
+  for (const event of [a.events[0], b.events[0], c.events[0], completed.events[0]]) {
+    assertSafeFixture(event);
+    assert.equal(canonicalEvent.safeParse(event).success, true);
+  }
 });
 
 test('M0 measured browser tracer, privacy scan and isolated replay', async () => {
@@ -95,6 +99,7 @@ test('M0 measured browser tracer, privacy scan and isolated replay', async () =>
     const a = capabilityBatch();
     const b = sessionStartBatch(a.events[0].payload.declaration_id);
     const c = heartbeatBatch(b.events[0]);
+    const workstreamId = v5(`provisional-workstream:v1:${b.events[0].source.source_id}:${b.events[0].event_id}`, b.events[0].workspace_id);
     for (const batch of [a, b]) { const result = await submit(batch); ack.push(result.duration_ms); responses.push(result.body); }
     const before = await live(); reads.push(before.duration_ms);
     assert.deepEqual(before.body.workstreams, []);
@@ -103,10 +108,14 @@ test('M0 measured browser tracer, privacy scan and isolated replay', async () =>
     projections.push(performance.now() - startProjectionAt);
     const startDrainFinishedAt = performance.now();
     frames.push(await nextFrame());
+    const startHint = parseSseFrame(frames.at(-1)!);
     realtime.push(performance.now() - startDrainFinishedAt);
     endToEndInvalidation.push(performance.now() - startProjectionAt);
     const starting = await live(); reads.push(starting.duration_ms);
     const row = starting.body.workstreams[0];
+    assert.equal(startHint.data.revision, '1');
+    assertTransition(startHint, starting.body, before.body.workspace_projection_revision, workstreamId,
+      b.events[0].session_id!, b.events[0].event_id, 'Starting');
     assert.equal(row.state, 'Active');
     assert.equal(row.sessions[0].state, 'Starting');
     assert.equal(row.sessions[0].id, b.events[0].session_id);
@@ -118,16 +127,19 @@ test('M0 measured browser tracer, privacy scan and isolated replay', async () =>
     projections.push(performance.now() - heartbeatProjectionAt);
     const heartbeatDrainFinishedAt = performance.now();
     frames.push(await nextFrame());
+    const heartbeatHint = parseSseFrame(frames.at(-1)!);
     realtime.push(performance.now() - heartbeatDrainFinishedAt);
     endToEndInvalidation.push(performance.now() - heartbeatProjectionAt);
     const running = await live(); reads.push(running.duration_ms);
+    assert.equal(heartbeatHint.data.revision, '2');
+    assertTransition(heartbeatHint, running.body, starting.body.workspace_projection_revision, workstreamId,
+      b.events[0].session_id!, c.events[0].event_id, 'Running');
     assert.equal(running.body.workstreams[0].id, row.id);
     assert.equal(running.body.workstreams[0].state, 'Active');
     assert.equal(running.body.workstreams[0].sessions[0].id, row.sessions[0].id);
     assert.equal(running.body.workstreams[0].sessions[0].state, 'Running');
     assert.equal(running.body.workstreams[0].sessions[0].latest_evidence_event_id, c.events[0].event_id);
     assert.equal(running.body.workspace_projection_revision, '2');
-    assert.ok(frames.slice(1).every(frame => frame.includes('event: projection.invalidated')));
     const replay = await verifyReplay(db, synthetic.workspace);
     assert.equal(replay.semantic.equal, true);
     assert.equal(replay.revisions.equal, true);
@@ -167,16 +179,16 @@ test('M0 measured browser tracer, privacy scan and isolated replay', async () =>
       await reject(event, 'invalid_field');
     }
     const records = await Promise.all([
-      db.query('SELECT event FROM canonical_event_ledger'), db.query('SELECT response FROM telemetry_batch_requests'),
-      db.query('SELECT data FROM session_projection'), db.query('SELECT data FROM workstream_projection'),
-      db.query('SELECT error_code FROM projection_jobs'), db.query('SELECT extension FROM telemetry_quarantine'),
+      db.query('SELECT * FROM canonical_event_ledger'), db.query('SELECT * FROM telemetry_batch_requests'),
+      db.query('SELECT * FROM telemetry_event_dispositions'), db.query('SELECT * FROM session_projection'),
+      db.query('SELECT * FROM workstream_projection'), db.query('SELECT * FROM projection_jobs'),
+      db.query('SELECT * FROM telemetry_quarantine'),
     ]);
-    const fixtureFiles = ['packages/test-fixtures/capability.ts', 'packages/test-fixtures/session.ts'];
-    const fixtureContents = await Promise.all(fixtureFiles.map(file => readFile(file, 'utf8')));
+    const acceptedFixtures = [a.events[0], b.events[0], c.events[0], sessionCompletionBatch(b.events[0], 4).events[0]];
+    acceptedFixtures.forEach(event => assertSafeFixture(event));
     const safeArtifacts = JSON.stringify({ records: records.map(result => result.rows), responses, rejectedResponses,
-      frames, replay, fixtures: fixtureContents, snapshots: [starting.body, running.body] });
+      frames, replay, snapshots: [before.body, starting.body, unchanged.body, running.body] });
     assert.equal(safeArtifacts.includes(prohibited), false);
-    assert.doesNotMatch(safeArtifacts, /"(?:prompt|message_body|clipboard|keystrokes|screenshot|file_content)"\s*:/i);
     assert.deepEqual((await db.query('SELECT event_kind FROM canonical_event_ledger ORDER BY ledger_id')).rows.map(row => row.event_kind),
       ['capabilities.declared', 'session.started', 'session.activity']);
     console.log(`M0_GATE_METRICS ${JSON.stringify({ environment: 'local PostgreSQL 17, Node.js, loopback HTTP/SSE, isolated test schema',

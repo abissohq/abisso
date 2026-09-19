@@ -13,7 +13,7 @@ worker. No production, GitHub, Claude, or Codex credentials are needed.
 
 The 19 September 2026 run created a separate Compose project with a fresh
 PostgreSQL volume, then removed that volume after the gate. Existing local
-development data was untouched. All seven gate suites (67 tests) passed. The startup tracer reported
+development data was untouched. All eight gate suites (70 tests) passed. The startup tracer reported
 `session_start_live_verified`, `session_heartbeat_live_verified`, and
 `session_evidence_stale_lifecycle_running_verified`.
 
@@ -30,7 +30,7 @@ development data was untouched. All seven gate suites (67 tests) passed. The sta
 | 9. Isolated replay | Replay suite and gate test compare independently rebuilt semantic state, identity, revisions, and watermarks without mutating live projections. |
 | 10. Completion fixture | Recovery suite verifies separate `session.completed` acceptance and Completed projection with stable session/Workstream IDs and no inferred outcome. |
 | 11. Local startup | Gate launches `pnpm dev` composition and runs `demo:start`; the command above documents clean-checkout prerequisites and explicit synthetic bootstrap. |
-| 12. Privacy | Profile/contract suites reject prohibited fields; gate injects prohibited prompt, message body, command, and extension content, then scans accepted ledger/projections, responses, worker error codes, quarantine, SSE frames, replay result, snapshots, and canonical fixture sources. Recovery tests inject a private worker-failure marker and assert only safe error codes persist. Gate output and composed runtime logs are checked for leakage of the injected markers. |
+| 12. Privacy | Profile/contract suites reject prohibited fields. The gate submits four prohibited-field variants and checks that their sentinel is absent from captured responses, ledger, dispositions, projections, jobs, quarantine, SSE frames, replay result, Live snapshots, and captured process output. It recursively checks the four accepted M0 fixture objects for forbidden field names and privacy classes. A recovery test injects private worker-failure text and checks that persisted job state contains only the safe `projection_failed` code; the gate also scans captured test output for that marker. These checks cover the exercised fixtures and injected markers only. |
 | 13. Latency | Focused gate test prints `M0_GATE_METRICS` for each exercised path and context; measurements below. |
 
 The final deployed M0 acceptance profile supports exactly
