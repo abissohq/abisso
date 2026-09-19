@@ -1,6 +1,6 @@
 import { z } from 'zod';
 
-export const profileVersion = 'm0-session-start-v1';
+export const profileVersion = 'm0-session-heartbeat-v1';
 export const uuid = z.uuid();
 export const eventId = z.union([z.uuidv7(), z.string().regex(/^(?:evt_)?[0-7][0-9A-HJKMNP-TV-Z]{25}$/)]);
 const opaqueId = z.union([uuid, z.string().regex(/^(?:cap|str|evt)_[0-9A-HJKMNP-TV-Z]{26}$/)]);

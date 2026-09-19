@@ -1,4 +1,4 @@
-import { projectSessionStart } from './sessions.ts';
+import { projectSessionHeartbeat, projectSessionStart } from './sessions.ts';
 import type pg from 'pg';
 import { transaction } from '../database/database.ts';
 import { projectCapability } from './capabilities.ts';
@@ -12,7 +12,9 @@ export async function processNext(db: pg.Pool): Promise<boolean> {
     if (!job) return false;
     if (job.event.event_kind === 'capabilities.declared') await completeCapabilityJob(client, projectCapability(job.ledger_id, job.event));
     else {
-      await projectSessionStart(client, job.ledger_id, job.event);
+      if (job.event.event_kind === 'session.started') await projectSessionStart(client, job.ledger_id, job.event);
+      else if (job.event.event_kind === 'session.activity') await projectSessionHeartbeat(client, job.ledger_id, job.event);
+      else throw new Error('unsupported_projection');
       await client.query("UPDATE projection_jobs SET status='completed', completed_at=clock_timestamp() WHERE ledger_id=$1", [job.ledger_id]);
     }
     return true;

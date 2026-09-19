@@ -16,7 +16,17 @@ export const sessionStartedEvent = capabilityEvent.extend({
     repo_ref: reference.optional(),
   }),
 });
-export const canonicalEvent = z.discriminatedUnion('event_kind', [capabilityEvent, sessionStartedEvent]);
+export const sessionActivityEvent = sessionStartedEvent.extend({
+  event_kind: z.literal('session.activity'),
+  payload: z.strictObject({
+    activity_class: z.literal('heartbeat'),
+    progress_counter: z.number().int().min(0).max(Number.MAX_SAFE_INTEGER),
+    availability: z.literal('available'),
+  }),
+});
+export const canonicalEvent = z.discriminatedUnion('event_kind', [capabilityEvent, sessionStartedEvent, sessionActivityEvent]);
 export type SessionStartedEvent = z.infer<typeof sessionStartedEvent>;
-export type AcceptedEvent = AcceptedCapabilityEvent | AcceptedSessionStartedEvent;
+export type SessionActivityEvent = z.infer<typeof sessionActivityEvent>;
+export type AcceptedEvent = AcceptedCapabilityEvent | AcceptedSessionStartedEvent | AcceptedSessionActivityEvent;
 export type AcceptedSessionStartedEvent = Omit<SessionStartedEvent, 'received_at'> & { received_at: string };
+export type AcceptedSessionActivityEvent = Omit<SessionActivityEvent, 'received_at'> & { received_at: string };

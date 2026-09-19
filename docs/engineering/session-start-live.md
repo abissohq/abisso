@@ -1,5 +1,8 @@
 # Issue #4: session start and browser Live
 
+This records the Issue #4 slice as merged. Issue #6 adds heartbeat, freshness,
+and realtime behavior in [heartbeat-realtime.md](heartbeat-realtime.md).
+
 The deployed intermediate profile is `m0-session-start-v1`, registering exactly
 `capabilities.declared` and `session.started`. The Issue #3 acceptance boundary
 and PostgreSQL transaction remain intact. No heartbeat, freshness computation,
@@ -44,9 +47,8 @@ PostgreSQL view. There is no notification allocation in this slice.
 
 `pnpm dev` builds and serves the minimal React view with API and worker at
 http://127.0.0.1:3001. Use the local synthetic sign-in link and the two explicit
-POST forms. `pnpm demo:start` logs in via that same browser boundary, submits A,
-waits for durable acceptance, submits B, and waits for an authorized Live reread
-showing Starting/Active. Then use **Reread Live** in the browser. The demo generates
+POST forms. `pnpm demo:start` now runs the Issue #6 three-batch heartbeat demonstration
+described in [heartbeat-realtime.md](heartbeat-realtime.md). The demo generates
 its own browser session; it never emits authentication secrets. Credentials may
 be renewed by running the demo again. `pnpm web:build` builds web assets for manual
 composition. Set `APP_ORIGIN` to the exact browser origin for nondefault setups;
