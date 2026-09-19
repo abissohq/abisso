@@ -129,6 +129,9 @@ test('delayed oldest job does not block a later eligible job and failed projecti
     assert.equal((await db.query('SELECT revision FROM workspace_projection_revisions')).rowCount, 0);
     assert.equal((await db.query('SELECT count(*)::int AS n FROM session_projection')).rows[0].n, 0);
     assert.equal((await db.query('SELECT count(*)::int AS n FROM canonical_event_ledger')).rows[0].n, 3);
+    const workerSafeState = (await db.query('SELECT * FROM projection_jobs')).rows;
+    assert.equal(JSON.stringify(workerSafeState).includes('private_marker'), false);
+    assert.deepEqual(workerSafeState.find(row => row.ledger_id === '2')?.error_code, 'projection_failed');
   } finally {
     await faultDb.end();
     await db.query(`DROP FUNCTION ${schema}.pg_notify(text,text)`);

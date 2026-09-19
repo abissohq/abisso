@@ -23,6 +23,7 @@
     "test:m0:recovery": "node tooling/test.ts tests/recovery.test.ts",
     "test:m0:replay": "node tooling/test.ts tests/replay.test.ts",
     "test:m0:ingestion": "node tooling/test.ts tests/mixed-batch-ingestion.test.ts",
+    "test:m0:gate": "node tooling/m0-gate.ts",
     "quarantine:purge": "node tooling/quarantine-purge.ts",
     "web:build": "node tooling/build-web.ts",
     "demo:start": "node tooling/demo-start.ts",
