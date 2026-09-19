@@ -7,7 +7,7 @@ import { join } from 'node:path';
 
 const suites = [
   'ingestion-foundation', 'session-start', 'mixed-batch-ingestion',
-  'recovery', 'heartbeat', 'replay', 'm0-gate',
+  'recovery', 'heartbeat', 'replay', 'm0-evidence', 'm0-gate',
 ];
 const privateOutput = /M0_PRIVATE_SENTINEL|PRIVATE_CONTENT_MUST_NOT_SURVIVE|private_marker/;
 const directory = await mkdtemp(join(tmpdir(), 'abisso-m0-gate-'));
