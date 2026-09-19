@@ -19,10 +19,12 @@
     "test:m0:ingestion-foundation": "node tooling/test.ts tests/ingestion-foundation.test.ts",
     "test": "node tooling/test.ts",
     "test:m0:start": "node tooling/test.ts tests/session-start.test.ts",
+    "test:m0:heartbeat": "node tooling/test.ts tests/heartbeat.test.ts",
     "test:m0:ingestion": "node tooling/test.ts tests/mixed-batch-ingestion.test.ts",
     "quarantine:purge": "node tooling/quarantine-purge.ts",
     "web:build": "node tooling/build-web.ts",
-    "demo:start": "node tooling/demo-start.ts"
+    "demo:start": "node tooling/demo-start.ts",
+    "demo:heartbeat": "node tooling/demo-start.ts"
   },
   "dependencies": {
     "canonicalize": "^5.0.0",

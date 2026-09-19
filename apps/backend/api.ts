@@ -1,6 +1,7 @@
 import { readFile } from 'node:fs/promises';
 import { beginLogin, syntheticLogin, sessionCookie } from '../../packages/browser/authentication.ts';
-import { readLive } from '../../packages/live/read.ts';
+import { authorizedWorkspace, readLive } from '../../packages/live/read.ts';
+import { Realtime } from '../../packages/live/realtime.ts';
 import { createServer } from 'node:http';
 import { gunzipSync } from 'node:zlib';
 import type pg from 'pg';
@@ -11,6 +12,7 @@ import { purgeExpiredQuarantine } from '../../packages/ingestion/quarantine-repo
 
 export function createApi(db: pg.Pool, options: { environment?: string; origin?: string; secureCookies?: boolean } = {}) {
   let ingesting = 0;
+  const realtime = new Realtime(db);
   const server = createServer(async (request, response) => {
     let admitted = false;
     response.setHeader('content-type', 'application/json');
@@ -32,6 +34,24 @@ export function createApi(db: pg.Pool, options: { environment?: string; origin?:
       }
       if (request.method === 'GET' && path.pathname === '/v1/live') {
         response.end(JSON.stringify(await readLive(db, request.headers.cookie, path.searchParams.get('workspace_id'))));
+        return;
+      }
+      if (request.method === 'GET' && path.pathname === '/v1/live/events') {
+        const origin = options.origin ?? `http://${request.headers.host}`;
+        if (request.headers.origin && request.headers.origin !== origin) throw new RequestFailure(403, 'origin_invalid');
+        const workspace = await authorizedWorkspace(db, request.headers.cookie, path.searchParams.get('workspace_id'));
+        if (!realtime.ready) throw new RequestFailure(503, 'realtime_degraded');
+        response.setHeader('content-type', 'text/event-stream; charset=utf-8');
+        response.setHeader('connection', 'keep-alive');
+        response.flushHeaders();
+        if (!realtime.subscribe(response, workspace, () => authorizedWorkspace(db, request.headers.cookie, workspace))) response.end();
+        const check = setInterval(() => {
+          void authorizedWorkspace(db, request.headers.cookie, workspace).then(() => {
+            if (!response.destroyed) response.write(': keepalive\n\n');
+          }).catch(() => response.end());
+        }, 15_000);
+        check.unref();
+        response.on('close', () => clearInterval(check));
         return;
       }
       if (['development', 'test'].includes(options.environment ?? '') && path.pathname.startsWith('/dev/login') && !path.search) {
@@ -100,6 +120,8 @@ export function createApi(db: pg.Pool, options: { environment?: string; origin?:
     }
   });
   server.requestTimeout = 10_000;
+  server.on('listening', () => realtime.start());
+  server.on('close', () => { void realtime.stop(); });
   if (['development', 'test'].includes(options.environment ?? '')) {
     const purge = () => { void purgeExpiredQuarantine(db).catch(() => { console.error('quarantine_cleanup_failed'); }); };
     const cleanup = setInterval(purge, 60_000);

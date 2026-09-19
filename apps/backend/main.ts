@@ -11,7 +11,10 @@ server.on('error', async () => {
   process.exitCode = 1;
 });
 server.listen(port, '127.0.0.1', () => { console.log('api_ready'); });
+let stopping = false;
 function stop() {
+  if (stopping) return;
+  stopping = true;
   server.close(() => { void db.end(); });
 }
 process.on('SIGINT', stop);
