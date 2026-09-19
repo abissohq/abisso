@@ -3,7 +3,7 @@ import type pg from 'pg';
 import type { AcceptedSessionActivityEvent, AcceptedSessionCompletedEvent, AcceptedSessionStartedEvent } from '../contracts/session.ts';
 import { projectionInvalidationChannel } from '../live/realtime-channel.ts';
 
-export const sessionProjectorVersion = 'm0-session-heartbeat-v1';
+export const sessionProjectorVersion = 'm0-session-recovery-v1';
 async function notify(client: pg.PoolClient, workspace_id: string, entity_id: string, revision: string) {
   await client.query('SELECT pg_notify($1,$2)', [projectionInvalidationChannel, JSON.stringify({ workspace_id, projection_type: 'workstream', entity_id, revision: String(revision) })]);
 }

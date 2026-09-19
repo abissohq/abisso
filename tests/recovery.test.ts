@@ -3,6 +3,7 @@ import { randomUUID } from 'node:crypto';
 import { once } from 'node:events';
 import { after, afterEach, beforeEach, test } from 'node:test';
 import pg from 'pg';
+import { v5 } from 'uuid';
 import { bootstrapSynthetic } from '../packages/database/bootstrap.ts';
 import { migrate, transaction } from '../packages/database/database.ts';
 import { ingest } from '../packages/ingestion/ingest.ts';
@@ -10,6 +11,7 @@ import { claimPendingJob, completeJob, ownsLease } from '../packages/processing/
 import { projectSessionStart } from '../packages/processing/sessions.ts';
 import { processNext } from '../packages/processing/worker.ts';
 import { createApi } from '../apps/backend/api.ts';
+import { projectionInvalidationChannel } from '../packages/live/realtime-channel.ts';
 import { capabilityBatch } from '../packages/test-fixtures/capability.ts';
 import { heartbeatBatch, sessionCompletionBatch, sessionStartBatch } from '../packages/test-fixtures/session.ts';
 
@@ -133,6 +135,36 @@ test('delayed oldest job does not block a later eligible job and failed projecti
   }
 });
 
+test('dead-lettered start blocks later completion without consuming evidence or invalidating Live', async () => {
+  const declaration = capabilityBatch(); await submit(declaration);
+  const start = sessionStartBatch(declaration.events[0].payload.declaration_id); await submit(start);
+  const completion = sessionCompletionBatch(start.events[0], 3); await submit(completion);
+  await processNext(db); // capability declaration
+  const workstreamId = v5(`provisional-workstream:v1:${start.events[0].source.source_id}:${start.events[0].event_id}`, start.events[0].workspace_id);
+  const listener = new pg.Client({ connectionString: process.env.TEST_DATABASE_URL });
+  const notifications: string[] = [];
+  await listener.connect();
+  try {
+    // LISTEN is database-wide, so exclude parallel tests' unrelated Workstreams.
+    listener.on('notification', message => {
+      if (message.channel === projectionInvalidationChannel && message.payload &&
+        JSON.parse(message.payload).entity_id === workstreamId) notifications.push(message.payload);
+    });
+    await listener.query(`LISTEN ${projectionInvalidationChannel}`);
+    await db.query("UPDATE projection_jobs SET status='dead_letter', attempt_count=5, error_code='projection_failed' WHERE ledger_id=2");
+    assert.equal(await processNext(db), false);
+    assert.equal(await transaction(db, client => claimPendingJob(client, 10)), undefined);
+    const jobs = (await db.query('SELECT ledger_id, status, attempt_count FROM projection_jobs ORDER BY ledger_id')).rows;
+    assert.deepEqual(jobs.map(row => [row.ledger_id, row.status, row.attempt_count]),
+      [['1', 'completed', 1], ['2', 'dead_letter', 5], ['3', 'pending', 0]]);
+    assert.equal((await db.query('SELECT count(*)::int AS n FROM session_projection')).rows[0].n, 0);
+    assert.equal((await db.query('SELECT count(*)::int AS n FROM workstream_projection')).rows[0].n, 0);
+    assert.equal((await db.query('SELECT count(*)::int AS n FROM workspace_projection_revisions')).rows[0].n, 0);
+    await listener.query('SELECT 1');
+    assert.deepEqual(notifications, []);
+  } finally { await listener.end(); }
+});
+
 test('separate completion event preserves session and Workstream identity without inferring an outcome', async () => {
   const declaration = capabilityBatch(); await submit(declaration);
   const start = sessionStartBatch(declaration.events[0].payload.declaration_id); await submit(start);
@@ -146,6 +178,7 @@ test('separate completion event preserves session and Workstream identity withou
   assert.equal(after.id, before.id);
   assert.equal(after.workstream_id, before.workstream_id);
   assert.equal(after.data.state, 'Completed');
+  assert.equal(after.data.projector_version, 'm0-session-recovery-v1');
   assert.equal(after.data.latest_evidence_event_id, completion.events[0].event_id);
   assert.equal(after.data.latest_source_contact_at, before.data.latest_source_contact_at);
   assert.equal(workstream.state, 'Active');

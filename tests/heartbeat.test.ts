@@ -193,10 +193,19 @@ test('quarantined heartbeat evidence cannot refresh Running or invalidate Live',
     const declaration = capabilityBatch(); await submit(declaration);
     const start = sessionStartBatch(declaration.events[0].payload.declaration_id); await submit(start);
     await drain();
-    assert.equal((await nextEvent(connection))?.event, 'projection.invalidated');
+    const workstreamId = (await snapshot(cookie)).workstreams[0].id;
+    // Parallel test schemas share the synthetic workspace ID and PostgreSQL notification channel.
+    async function nextOwnInvalidation() {
+      for (;;) {
+        const hint = await nextEvent(connection);
+        assert.ok(hint, 'SSE stream closed');
+        if (hint.event === 'projection.invalidated' && hint.data.entity_id === workstreamId) return hint;
+      }
+    }
+    assert.equal((await nextOwnInvalidation()).data.revision, '1');
     const heartbeat = heartbeatBatch(start.events[0]); await submit(heartbeat);
     await drain();
-    assert.equal((await nextEvent(connection))?.event, 'projection.invalidated');
+    assert.equal((await nextOwnInvalidation()).data.revision, '2');
     const before = await snapshot(cookie);
     assert.equal(before.workstreams[0].sessions[0].state, 'Running');
 
@@ -218,7 +227,7 @@ test('quarantined heartbeat evidence cannot refresh Running or invalidate Live',
     assert.equal((await db.query('SELECT count(*)::int AS n FROM projection_jobs')).rows[0].n, 3);
     assert.equal((await db.query('SELECT count(*)::int AS n FROM telemetry_quarantine')).rows[0].n, 1);
     assert.ok(!JSON.stringify(after).includes(quarantined.events[0].event_id));
-    const pending = nextEvent(connection);
+    const pending = nextOwnInvalidation();
     assert.equal(await Promise.race([pending.then(() => 'invalidated'), delay(80).then(() => 'silent')]), 'silent');
   } finally { connection.abort.abort(); }
 });

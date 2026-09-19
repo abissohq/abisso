@@ -17,7 +17,7 @@ export async function claimPendingJob(client: pg.PoolClient, leaseMs: number): P
          SELECT 1 FROM projection_jobs earlier
          JOIN canonical_event_ledger e ON e.ledger_id=earlier.ledger_id
          WHERE e.workspace_id=l.workspace_id AND e.session_id=l.session_id
-           AND e.ledger_id<l.ledger_id AND earlier.status IN ('pending','running')
+           AND e.ledger_id<l.ledger_id AND earlier.status <> 'completed'
        ))
      ORDER BY j.ledger_id LIMIT 1 FOR UPDATE OF j SKIP LOCKED`,
     )).rows[0];
