@@ -67,7 +67,7 @@ export async function ingest(db: pg.Pool, authorization: string | undefined, inp
       let reason: string | undefined;
       if (raw.workspace_id !== authority.workspace_id || raw.user_id !== authority.user_id || raw.machine_id !== authority.machine_id) reason = 'identity_mismatch';
       else if (raw.schema_version !== '1.0') reason = 'unknown_schema';
-      else if (!['capabilities.declared', 'session.started', 'session.activity'].includes(raw.event_kind as string)) reason = 'unknown_event_kind';
+      else if (!['capabilities.declared', 'session.started', 'session.activity', 'session.completed'].includes(raw.event_kind as string)) reason = 'unknown_event_kind';
       else if (!validation.success) {
         const invalidTimestamp = validation.error.issues.some(issue =>
           issue.path[0] === 'occurred_at' || issue.path[0] === 'observed_at' ||
@@ -81,12 +81,12 @@ export async function ingest(db: pg.Pool, authorization: string | undefined, inp
         else if (event.privacy.policy_version !== authority.policy_version) reason = 'privacy_policy_violation';
         else if ((Date.parse(event.occurred_at) > now.getTime() + 5 * 60_000 || Date.parse(event.observed_at) > now.getTime() + 5 * 60_000) && event.clock.quality !== 'unsynchronized') reason = 'timestamp_invalid';
         else if (event.event_kind === 'capabilities.declared' && (Date.parse(event.payload.valid_from) > now.getTime() || (event.payload.valid_until && Date.parse(event.payload.valid_until) <= Math.max(now.getTime(), Date.parse(event.payload.valid_from))))) reason = 'timestamp_invalid';
-        else if (event.event_kind === 'session.started' || event.event_kind === 'session.activity') {
+        else if (event.event_kind === 'session.started' || event.event_kind === 'session.activity' || event.event_kind === 'session.completed') {
           const declaration = declarations.find(row => row.source_id === source.id);
           if (!declaration || declaration.declaration_id !== event.capability_snapshot_id ||
               declaration.valid_from.getTime() > now.getTime() || (declaration.valid_until && declaration.valid_until.getTime() <= now.getTime()) ||
-              !declaration.event.payload.capabilities.some((value: { name: string; status: string; quality: string }) => value.name === (event.event_kind === 'session.started' ? 'session.lifecycle' : 'session.activity_structured') && value.status === 'available' && value.quality === 'direct')) reason = 'capability_unavailable';
-          if (!reason && event.event_kind === 'session.activity') {
+              !declaration.event.payload.capabilities.some((value: { name: string; status: string; quality: string }) => value.name === (event.event_kind === 'session.activity' ? 'session.activity_structured' : 'session.lifecycle') && value.status === 'available' && value.quality === 'direct')) reason = 'capability_unavailable';
+          if (!reason && (event.event_kind === 'session.activity' || event.event_kind === 'session.completed')) {
             const started = await client.query(`SELECT 1 FROM canonical_event_ledger WHERE workspace_id=$1 AND source_id=$2 AND session_id=$3 AND event_kind='session.started' LIMIT 1`, [authority.workspace_id, source.id, event.session_id]);
             if (!started.rowCount) reason = 'invalid_field';
           }

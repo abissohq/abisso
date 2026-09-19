@@ -6,9 +6,13 @@ let stopping = false;
 process.on('SIGINT', () => { stopping = true; });
 process.on('SIGTERM', () => { stopping = true; });
 const db = database();
+const workerOptions = {
+  leaseMs: Number(process.env.WORKER_LEASE_MS ?? 30_000),
+  backoffBaseMs: Number(process.env.WORKER_BACKOFF_BASE_MS ?? 1_000),
+};
 try {
   do {
-    const processed = await processNext(db);
+    const processed = await processNext(db, workerOptions);
     if (process.argv.includes('--once') || (process.argv.includes('--drain') && !processed)) break;
     if (!processed) await setTimeout(250);
   } while (!stopping);

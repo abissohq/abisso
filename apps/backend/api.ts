@@ -123,6 +123,12 @@ export function createApi(db: pg.Pool, options: { environment?: string; origin?:
     }
   });
   server.requestTimeout = 10_000;
+  const close = server.close.bind(server);
+  server.close = callback => {
+    // SSE responses are long-lived; end them before waiting for HTTP close.
+    void realtime.stop();
+    return close(callback);
+  };
   server.on('listening', () => realtime.start());
   server.on('close', () => { void realtime.stop(); });
   if (['development', 'test'].includes(options.environment ?? '')) {

@@ -291,7 +291,7 @@ test('SQL notification failure rolls back projection and emits only after a succ
   const faultDb = new pg.Pool({ connectionString: process.env.TEST_DATABASE_URL, options: `-c search_path=${schema},pg_catalog` });
   const pending = nextEvent(connection);
   try {
-    await assert.rejects(processNext(faultDb), /injected_notify_failure/);
+    await processNext(faultDb, { backoffBaseMs: 1 });
     assert.equal((await snapshot(cookie)).workspace_projection_revision, '0');
     assert.equal((await db.query("SELECT status FROM projection_jobs WHERE ledger_id=2")).rows[0].status, 'pending');
     assert.equal(await Promise.race([pending.then(() => 'notified'), delay(40).then(() => 'silent')]), 'silent');
@@ -299,6 +299,7 @@ test('SQL notification failure rolls back projection and emits only after a succ
     await faultDb.end();
     await db.query(`DROP FUNCTION ${schema}.pg_notify(text,text)`);
   }
+  await db.query("UPDATE projection_jobs SET available_at=clock_timestamp()-interval '1 second' WHERE ledger_id=2");
   await processNext(db);
   assert.equal((await pending)?.data.revision, '1');
   assert.equal((await snapshot(cookie)).workspace_projection_revision, '1');

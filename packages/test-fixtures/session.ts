@@ -1,6 +1,6 @@
 import { v7 } from 'uuid';
 import { capabilityBatch } from './capability.ts';
-import type { SessionActivityEvent, SessionStartedEvent } from '../contracts/session.ts';
+import type { SessionActivityEvent, SessionCompletedEvent, SessionStartedEvent } from '../contracts/session.ts';
 export function sessionStartBatch(declaration: string, sequence = 2) {
   const base = capabilityBatch(sequence);
   const { payload: _, ...envelope } = base.events[0];
@@ -12,5 +12,12 @@ export function heartbeatBatch(start: SessionStartedEvent, sequence = start.sour
   const event: SessionActivityEvent = { ...start, event_id: v7(), event_kind: 'session.activity',
     source: { ...start.source, source_sequence: sequence }, occurred_at: now, observed_at: now,
     payload: { activity_class: 'heartbeat', progress_counter: progressCounter, availability: 'available' } };
+  return { request_id: v7(), issued_at: now, events: [event] };
+}
+export function sessionCompletionBatch(start: SessionStartedEvent, sequence = start.source.source_sequence + 1) {
+  const now = new Date().toISOString();
+  const event: SessionCompletedEvent = { ...start, event_id: v7(), event_kind: 'session.completed',
+    source: { ...start.source, source_sequence: sequence }, occurred_at: now, observed_at: now,
+    payload: { result: 'completed' } };
   return { request_id: v7(), issued_at: now, events: [event] };
 }
