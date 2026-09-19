@@ -90,7 +90,11 @@ try {
   phase = 'freshness';
   const staleAt = Date.parse(running.workstreams.find(row => row.id === workstream.id)!.sessions[0].fresh_through_at) + 1;
   await setTimeout(Math.max(0, staleAt - Date.now()));
-  if ((await live()).workstreams.find(row => row.id === workstream.id)?.sessions[0].freshness_status !== 'Stale') throw new Error('stale_presentation_missing');
+  const staleDeadline = Date.now() + 5_000;
+  while ((await live()).workstreams.find(row => row.id === workstream.id)?.sessions[0].freshness_status !== 'Stale') {
+    if (Date.now() >= staleDeadline) throw new Error('stale_presentation_missing');
+    await setTimeout(50);
+  }
   console.log('session_evidence_stale_lifecycle_running_verified');
 } catch {
   console.error(`session_heartbeat_demo_failed:${phase}`);
