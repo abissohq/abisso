@@ -1,4 +1,4 @@
-import { createHash, randomBytes, randomUUID, timingSafeEqual } from 'node:crypto';
+import { createHash, randomBytes, timingSafeEqual } from 'node:crypto';
 import { createServer } from 'node:http';
 import { once } from 'node:events';
 import type { EnrollmentStore } from './keychain.ts';
@@ -17,7 +17,9 @@ export async function enrollMachine(serverOrigin: string, store: EnrollmentStore
   const verifier = random();
   const challenge = createHash('sha256').update(verifier).digest('base64url');
   const state = random();
-  const installationId = randomUUID();
+  // Reserve a stable device-only identity before the server can register a machine.
+  // A failed credential write must not make a retry look like a new installation.
+  const installationId = store.installationId();
   let finished = false;
   let resolveCode!: (code: string) => void;
   let rejectCode!: (error: Error) => void;

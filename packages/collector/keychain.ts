@@ -1,9 +1,22 @@
 import { spawnSync } from 'node:child_process';
 import { fileURLToPath } from 'node:url';
+import { enrollmentScope } from '../contracts/enrollment.ts';
 
 export type EnrollmentSecret = { installation_id: string; machine_id: string; workspace_id: string; user_id: string; refresh_token: string; scope: string };
-export type EnrollmentStore = { read(): EnrollmentSecret | null; write(value: EnrollmentSecret): void };
+export type EnrollmentStore = { read(): EnrollmentSecret | null; installationId(): string; write(value: EnrollmentSecret): void };
 const helper = fileURLToPath(new URL('../../apps/collector/dist/keychain-helper', import.meta.url));
+const uuidPattern = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
+const tokenPattern = /^[A-Za-z0-9_-]{43}$/;
+const fields = ['installation_id', 'machine_id', 'workspace_id', 'user_id', 'refresh_token', 'scope'];
+function validSecret(value: unknown): value is EnrollmentSecret {
+  if (!value || typeof value !== 'object' || Array.isArray(value)) return false;
+  const record = value as Record<string, unknown>;
+  return Object.keys(record).length === fields.length && fields.every(field => Object.hasOwn(record, field))
+    && ['installation_id', 'machine_id', 'workspace_id', 'user_id'].every(field =>
+      typeof record[field] === 'string' && uuidPattern.test(record[field]))
+    && typeof record.refresh_token === 'string' && tokenPattern.test(record.refresh_token)
+    && record.scope === enrollmentScope;
+}
 
 function execute(input: { operation: string; value?: string }) {
   const result = spawnSync(helper, [], { input: JSON.stringify(input), encoding: 'utf8', timeout: 10_000,
@@ -16,13 +29,21 @@ export function createKeychainStore(run = execute): EnrollmentStore { return {
   read() {
     const value = run({ operation: 'read' });
     if (value === 'absent') return null;
+    const installationId = run({ operation: 'read_installation' });
     try {
-      const parsed = JSON.parse(value) as EnrollmentSecret;
-      if (typeof parsed.refresh_token !== 'string' || typeof parsed.machine_id !== 'string') throw new Error();
+      const parsed: unknown = JSON.parse(value);
+      if (!validSecret(parsed) || value !== JSON.stringify(parsed)
+        || parsed.installation_id !== installationId) throw new Error();
       return parsed;
     } catch { throw new Error('keychain_invalid'); }
   },
+  installationId() {
+    const value = run({ operation: 'installation' });
+    if (!uuidPattern.test(value)) throw new Error('keychain_invalid');
+    return value;
+  },
   write(value) {
+    if (!validSecret(value) || value.installation_id !== this.installationId()) throw new Error('keychain_invalid');
     if (this.read()) throw new Error('already_enrolled');
     if (run({ operation: 'write', value: JSON.stringify(value) }) !== 'stored') throw new Error('keychain_unavailable');
   },

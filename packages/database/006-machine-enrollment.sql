@@ -29,8 +29,12 @@ CREATE TABLE machine_audit (
   actor_type text NOT NULL CHECK (actor_type = 'user'),
   actor_id uuid NOT NULL REFERENCES users,
   action text NOT NULL CHECK (action = 'machine.registered'),
-  target_machine_id uuid NOT NULL REFERENCES machines,
-  result text NOT NULL CHECK (result = 'success'),
+  target_type text NOT NULL CHECK (target_type IN ('machine', 'installation')),
+  target_id uuid NOT NULL,
+  result text NOT NULL CHECK (result IN ('success', 'rejected')),
+  reason text NOT NULL CHECK (reason IN ('authorized_enrollment', 'installation_conflict')),
+  before_state text NOT NULL CHECK (before_state IN ('unregistered', 'registered')),
+  after_state text NOT NULL CHECK (after_state = 'registered'),
   request_id uuid NOT NULL,
   recorded_at timestamptz NOT NULL DEFAULT clock_timestamp()
 );

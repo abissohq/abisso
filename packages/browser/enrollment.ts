@@ -56,7 +56,8 @@ export async function redeemEnrollmentCode(db: pg.Pool, input: Record<string, un
   }
   const actualChallenge = createHash('sha256').update(input.verifier).digest('base64url');
   const code = input.code;
-  return transaction(db, async client => {
+  let conflictActor: { userId: string; workspaceId: string } | undefined;
+  try { return await transaction(db, async client => {
     const row = (await client.query(`SELECT user_id, workspace_id, redirect_uri, challenge, display_name, scope
       FROM machine_enrollment_codes WHERE digest=$1 AND purpose='machine-enrollment'
       AND consumed_at IS NULL AND expires_at > clock_timestamp() FOR UPDATE`, [digest(code)])).rows[0];
@@ -77,7 +78,11 @@ export async function redeemEnrollmentCode(db: pg.Pool, input: Record<string, un
       await client.query(`INSERT INTO machines (id,workspace_id,user_id,active,installation_id,display_name)
         VALUES ($1,$2,$3,true,$4,$5)`, [machineId, row.workspace_id, row.user_id, input.installation_id, row.display_name]);
     } catch (error) {
-      if ((error as { code?: string }).code === '23505') throw new RequestFailure(409, 'installation_conflict');
+      if ((error as { code?: string; constraint?: string }).code === '23505'
+        && (error as { constraint?: string }).constraint === 'one_active_machine_per_installation') {
+        conflictActor = { userId: row.user_id, workspaceId: row.workspace_id };
+        throw new RequestFailure(409, 'installation_conflict');
+      }
       throw error;
     }
     await client.query(`INSERT INTO machine_credentials (digest,machine_id,audience,expires_at)
@@ -85,9 +90,24 @@ export async function redeemEnrollmentCode(db: pg.Pool, input: Record<string, un
     await client.query(`INSERT INTO machine_refresh_credentials (digest,machine_id,expires_at)
       VALUES ($1,$2,clock_timestamp() + interval '90 days')`, [refreshDigest, machineId]);
     await client.query(`INSERT INTO machine_audit
-      (workspace_id,actor_type,actor_id,action,target_machine_id,result,request_id)
-      VALUES ($1,'user',$2,'machine.registered',$3,'success',$4)`, [row.workspace_id, row.user_id, machineId, v7()]);
+      (workspace_id,actor_type,actor_id,action,target_type,target_id,result,reason,before_state,after_state,request_id)
+      VALUES ($1,'user',$2,'machine.registered','machine',$3,'success','authorized_enrollment','unregistered','registered',$4)`,
+      [row.workspace_id, row.user_id, machineId, v7()]);
     return { machine_id: machineId, workspace_id: row.workspace_id as string, user_id: row.user_id as string,
       scope: enrollmentScope, access_token: accessToken, expires_in: 900, refresh_token: refreshToken };
-  });
+  }); } catch (error) {
+    // The conflicting INSERT aborts its transaction. Record the safe rejection only
+    // after rollback, using identity verified from the bound enrollment code.
+    if (conflictActor && error instanceof RequestFailure && error.code === 'installation_conflict') {
+      const existing = await db.query(`SELECT id FROM machines WHERE installation_id=$1 AND active
+        AND workspace_id=$2 AND user_id=$3`, [input.installation_id, conflictActor.workspaceId, conflictActor.userId]);
+      const target = existing.rows[0]?.id ?? input.installation_id;
+      const targetType = existing.rowCount ? 'machine' : 'installation';
+      await db.query(`INSERT INTO machine_audit
+        (workspace_id,actor_type,actor_id,action,target_type,target_id,result,reason,before_state,after_state,request_id)
+        VALUES ($1,'user',$2,'machine.registered',$3,$4,'rejected','installation_conflict','registered','registered',$5)`,
+        [conflictActor.workspaceId, conflictActor.userId, targetType, target, v7()]);
+    }
+    throw error;
+  }
 }
