@@ -46,7 +46,7 @@ try {
     process.stderr.write('ipc_unavailable\n');
     process.exitCode = 1;
   });
-} catch (error) {
-  process.stderr.write(`${error instanceof Error ? error.message : 'cli_failed'}\n`);
+} catch {
+  process.stderr.write('cli_failed\n');
   process.exitCode = 1;
 }

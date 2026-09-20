@@ -1,7 +1,7 @@
 import assert from 'node:assert/strict';
 import { spawn, spawnSync, type ChildProcess } from 'node:child_process';
 import { chmodSync, mkdirSync, mkdtempSync, statSync, rmSync } from 'node:fs';
-import { createConnection } from 'node:net';
+import { createConnection, createServer } from 'node:net';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { after, test } from 'node:test';
@@ -116,6 +116,54 @@ test('CLI refuses a socket whose mode is no longer private', async () => {
   await stop(child);
 });
 
+test('normal IPC request and response contain no credential or key fields', async () => {
+  const directory = runtime();
+  mkdirSync(directory, { mode: 0o700 });
+  const socketPath = join(directory, 'collector.sock');
+  let received = '';
+  const server = createServer(socket => {
+    socket.setEncoding('utf8');
+    socket.on('data', (chunk: string) => { received += chunk; });
+    socket.on('end', () => socket.end('{"version":1,"state":"inactive","enrollment":"unenrolled","collection":"stopped"}\n'));
+  });
+  await new Promise<void>((resolve, reject) => {
+    server.once('error', reject);
+    server.listen(socketPath, resolve);
+  });
+  chmodSync(socketPath, 0o600);
+  try {
+    const child = spawn(process.execPath, ['apps/collector/cli.ts', '--runtime-dir', directory, 'status'], {
+      stdio: ['ignore', 'pipe', 'pipe'],
+    });
+    let output = '';
+    child.stdout!.on('data', chunk => { output += chunk; });
+    const exitCode = await new Promise<number | null>(resolve => child.once('exit', resolve));
+    assert.equal(exitCode, 0);
+    assert.equal(received, '{"version":1,"command":"status"}\n');
+    assert.deepEqual(JSON.parse(output), {
+      version: 1, state: 'inactive', enrollment: 'unenrolled', collection: 'stopped',
+    });
+    assert.doesNotMatch(received + output, /credential|secret|token|key/i);
+  } finally {
+    await new Promise<void>(resolve => server.close(() => resolve()));
+  }
+});
+
+test('a second UID cannot connect when a passwordless UID switch is available', async t => {
+  const probe = spawnSync('sudo', ['-n', '-u', 'nobody', process.execPath, '-e', 'process.exit(0)'], { stdio: 'ignore' });
+  if (probe.status !== 0) {
+    t.skip('a second UID is unavailable without an interactive privilege change');
+    return;
+  }
+  const directory = runtime();
+  const child = await daemon(directory);
+  const script = 'const s=require("node:net").createConnection(process.argv[1]);s.on("connect",()=>process.exit(0));s.on("error",()=>process.exit(1));';
+  const result = spawnSync('sudo', ['-n', '-u', 'nobody', process.execPath, '-e', script,
+    join(directory, 'collector.sock')], { encoding: 'utf8', timeout: 3000 });
+  assert.notEqual(result.status, 0);
+  await stop(child);
+});
+
 test('insecure runtime permissions fail closed', () => {
   const directory = runtime();
   mkdirSync(directory, { mode: 0o755 });
@@ -124,4 +172,12 @@ test('insecure runtime permissions fail closed', () => {
     encoding: 'utf8', timeout: 3000,
   });
   assert.notEqual(result.status, 0);
+  assert.doesNotMatch(result.stderr, /abisso-collector-test-/);
+});
+
+test('CLI diagnostics do not print runtime paths', () => {
+  const directory = runtime();
+  const result = cli(directory, 'status');
+  assert.notEqual(result.status, 0);
+  assert.doesNotMatch(result.stderr, /abisso-collector-test-/);
 });

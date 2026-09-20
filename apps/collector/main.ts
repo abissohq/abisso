@@ -44,23 +44,30 @@ try {
   unlock = acquireLock(directory);
   socketPath = join(directory, SOCKET_NAME);
   const server = createServer(serve);
+  const cleanup = () => {
+    try { if (socketPath && lstatSync(socketPath).isSocket()) unlinkSync(socketPath); } catch {}
+    unlock?.();
+  };
   server.on('error', () => {
     process.stderr.write('collector_start_failed\n');
     process.exitCode = 1;
     unlock?.();
   });
   server.listen(socketPath, () => {
-    chmodSync(socketPath!, 0o600);
-    process.stdout.write('collector_ready\n');
+    try {
+      chmodSync(socketPath!, 0o600);
+      process.stdout.write('collector_ready\n');
+    } catch {
+      process.stderr.write('collector_start_failed\n');
+      server.close(cleanup);
+      process.exitCode = 1;
+    }
   });
-  const shutdown = () => server.close(() => {
-    try { if (socketPath && lstatSync(socketPath).isSocket()) unlinkSync(socketPath); } catch {}
-    unlock?.();
-  });
+  const shutdown = () => server.close(cleanup);
   process.on('SIGTERM', shutdown);
   process.on('SIGINT', shutdown);
-} catch (error) {
+} catch {
   unlock?.();
-  process.stderr.write(`${error instanceof Error ? error.message : 'collector_start_failed'}\n`);
+  process.stderr.write('collector_start_failed\n');
   process.exitCode = 1;
 }
