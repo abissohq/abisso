@@ -1,4 +1,5 @@
 import { readFile } from 'node:fs/promises';
+import { randomUUID } from 'node:crypto';
 import { beginLogin, browserSession, clerkLogin, createWorkspace, currentWorkspace, csrfCookie, logoutBrowser, sessionCookie, syntheticLogin } from '../../packages/browser/authentication.ts';
 import type { BrowserIdentityVerifier } from '../../packages/browser/clerk.ts';
 import { clerkBrowserScripts } from '../../packages/browser/clerk.ts';
@@ -12,10 +13,15 @@ import { ingest } from '../../packages/ingestion/ingest.ts';
 import { limits, parseCanonicalJson } from '../../packages/contracts/json.ts';
 import { purgeExpiredQuarantine } from '../../packages/ingestion/quarantine-repository.ts';
 
-export function createApi(db: pg.Pool, options: { environment?: string; origin?: string; secureCookies?: boolean; browserIdentity?: BrowserIdentityVerifier; clerkPublishableKey?: string } = {}) {
+const safeErrorCodes = new Set(['admission_limit', 'csrf_invalid', 'hard_limit', 'inactive_authority', 'internal_error', 'invalid_compressed_body', 'invalid_credentials', 'invalid_form', 'invalid_identity', 'invalid_json', 'login_invalid', 'login_unavailable', 'malformed_wrapper', 'membership_conflict', 'not_found', 'origin_invalid', 'realtime_degraded', 'request_expired', 'unauthenticated', 'unsupported_encoding']);
+
+export function createApi(db: pg.Pool, options: { environment?: string; origin?: string; secureCookies?: boolean; browserIdentity?: BrowserIdentityVerifier; clerkPublishableKey?: string; diagnosticLog?: (line: string) => void } = {}) {
   let ingesting = 0;
   const realtime = new Realtime(db);
   const server = createServer(async (request, response) => {
+    const correlationId = randomUUID();
+    const started = performance.now();
+    response.setHeader('x-correlation-id', correlationId);
     let admitted = false;
     response.setHeader('content-type', 'application/json');
     response.setHeader('cache-control', 'no-store');
@@ -163,7 +169,10 @@ export function createApi(db: pg.Pool, options: { environment?: string; origin?:
       response.writeHead(result.status).end(result.body);
     } catch (error) {
       const failure = error instanceof RequestFailure ? error : new RequestFailure(500, 'internal_error');
-      response.writeHead(failure.status).end(JSON.stringify({ error: failure.code }));
+      const code = safeErrorCodes.has(failure.code) ? failure.code : 'internal_error';
+      const line = JSON.stringify({ code, correlation_id: correlationId, status: failure.status, duration_ms: Math.min(60_000, Math.floor((performance.now() - started) / 100) * 100) });
+      try { (options.diagnosticLog ?? console.error)(line); } catch { /* Logging must not change the response. */ }
+      response.writeHead(failure.status).end(JSON.stringify({ error: code }));
     } finally {
       if (admitted) ingesting--;
     }

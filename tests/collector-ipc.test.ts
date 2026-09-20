@@ -1,9 +1,9 @@
 import assert from 'node:assert/strict';
 import { spawn, spawnSync, type ChildProcess } from 'node:child_process';
-import { chmodSync, mkdirSync, mkdtempSync, statSync, rmSync, symlinkSync } from 'node:fs';
+import { chmodSync, mkdirSync, mkdtempSync, statSync, rmSync, symlinkSync, writeFileSync, readFileSync } from 'node:fs';
 import { createConnection, createServer } from 'node:net';
 import { tmpdir } from 'node:os';
-import { join } from 'node:path';
+import { dirname, join } from 'node:path';
 import { after, test } from 'node:test';
 
 const roots: string[] = [];
@@ -67,6 +67,35 @@ test('status is inactive and IPC filesystem is private', async () => {
     version: 1, state: 'inactive', enrollment: 'unenrolled', collection: 'stopped',
   });
   await stop(child);
+});
+
+test('explicit diagnostic export is inspectable and omits unrelated local files', async () => {
+  const directory = runtime();
+  const child = await daemon(directory);
+  try {
+    const result = cli(directory, 'diagnostics', 'export');
+    assert.equal(result.status, 0);
+    const bundle = JSON.parse(result.stdout);
+    assert.equal(bundle.format_version, 1);
+    assert.deepEqual(bundle.status, { version: 1, state: 'inactive', enrollment: 'unenrolled', collection: 'stopped' });
+    assert.ok(bundle.logs.some((row: { code: string }) => row.code === 'collector_ready'));
+    assert.doesNotMatch(result.stdout, /collector.sock|daemon.lock|runtime/);
+  } finally { await stop(child); }
+});
+
+test('uncaught collector failures emit only a fixed code', async () => {
+  const directory = runtime();
+  const script = join(dirname(directory), 'crash.mjs');
+  writeFileSync(script, 'setTimeout(() => { throw new Error("sk-test-P0-crash-secret") }, 400);');
+  const child = spawn(process.execPath, ['--import', script, 'apps/collector/main.ts', '--runtime-dir', directory], {
+    stdio: ['ignore', 'pipe', 'pipe'],
+  });
+  children.push(child);
+  let stderr = '';
+  child.stderr!.on('data', chunk => { stderr += chunk; });
+  await new Promise(resolve => child.once('exit', resolve));
+  assert.equal(stderr, 'collector_crashed\n');
+  assert.doesNotMatch(readFileSync(join(directory, 'diagnostics.0.log'), 'utf8'), /sk-test-P0-crash-secret/);
 });
 
 test('a slow-drip request is rejected by the absolute IPC deadline', async () => {
