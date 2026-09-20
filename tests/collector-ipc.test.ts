@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict';
 import { spawn, spawnSync, type ChildProcess } from 'node:child_process';
-import { chmodSync, mkdirSync, mkdtempSync, statSync, rmSync } from 'node:fs';
+import { chmodSync, mkdirSync, mkdtempSync, statSync, rmSync, symlinkSync } from 'node:fs';
 import { createConnection, createServer } from 'node:net';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
@@ -67,6 +67,154 @@ test('status is inactive and IPC filesystem is private', async () => {
     version: 1, state: 'inactive', enrollment: 'unenrolled', collection: 'stopped',
   });
   await stop(child);
+});
+
+test('a slow-drip request is rejected by the absolute IPC deadline', async () => {
+  const directory = runtime();
+  const child = await daemon(directory);
+  const socket = createConnection(join(directory, 'collector.sock'));
+  socket.setEncoding('utf8');
+  let response = '';
+  let ended = false;
+  socket.on('data', chunk => { response += chunk; });
+  socket.on('end', () => { ended = true; });
+  await new Promise<void>((resolve, reject) => {
+    socket.once('connect', resolve);
+    socket.once('error', reject);
+  });
+  const drip = setInterval(() => socket.write(' '), 700);
+  try {
+    await new Promise(resolve => setTimeout(resolve, 3600));
+    assert.deepEqual(JSON.parse(response), { version: 1, error: 'invalid_request' });
+    assert.equal(ended, true);
+  } finally {
+    clearInterval(drip);
+    socket.destroy();
+    await stop(child);
+  }
+});
+
+test('multiple IPC messages are rejected regardless of write boundaries', async () => {
+  const directory = runtime();
+  const child = await daemon(directory);
+  const message = '{"version":1,"command":"status"}\n';
+  try {
+    const together = await request(directory, message + message);
+    const extraByte = await request(directory, message + 'x');
+    const separated = await new Promise<string>((resolve, reject) => {
+      const socket = createConnection(join(directory, 'collector.sock'));
+      socket.setEncoding('utf8');
+      let response = '';
+      let secondWrite: ReturnType<typeof setTimeout>;
+      socket.on('connect', () => {
+        socket.write(message);
+        secondWrite = setTimeout(() => socket.end(message), 100);
+      });
+      socket.on('data', chunk => { response += chunk; });
+      socket.on('end', () => {
+        clearTimeout(secondWrite);
+        resolve(response);
+      });
+      socket.on('error', reject);
+    });
+    assert.deepEqual([JSON.parse(together), JSON.parse(extraByte), JSON.parse(separated)], [
+      { version: 1, error: 'invalid_request' },
+      { version: 1, error: 'invalid_request' },
+      { version: 1, error: 'invalid_request' },
+    ]);
+  } finally {
+    await stop(child);
+  }
+});
+
+test('IPC accepts a request at 1024 bytes and rejects one byte more', async () => {
+  const directory = runtime();
+  const child = await daemon(directory);
+  const message = '{"version":1,"command":"status"}\n';
+  try {
+    const atLimit = await request(directory, ' '.repeat(1024 - Buffer.byteLength(message)) + message);
+    const overLimit = await request(directory, ' '.repeat(1025 - Buffer.byteLength(message)) + message);
+    assert.deepEqual([JSON.parse(atLimit), JSON.parse(overLimit)], [
+      { version: 1, state: 'inactive', enrollment: 'unenrolled', collection: 'stopped' },
+      { version: 1, error: 'invalid_request' },
+    ]);
+  } finally {
+    await stop(child);
+  }
+});
+
+test('malformed and unterminated IPC requests are rejected', async () => {
+  const directory = runtime();
+  const child = await daemon(directory);
+  try {
+    const malformed = await request(directory, '{"version":1,"command":}\n');
+    const unterminated = await request(directory, '{"version":1,"command":"status"}');
+    assert.deepEqual([JSON.parse(malformed), JSON.parse(unterminated)], [
+      { version: 1, error: 'invalid_request' },
+      { version: 1, error: 'invalid_request' },
+    ]);
+  } finally {
+    await stop(child);
+  }
+});
+
+test('default runtime starts when Application Support is absent', async () => {
+  const home = mkdtempSync('/tmp/ab-');
+  roots.push(home);
+  chmodSync(home, 0o700);
+  mkdirSync(join(home, 'Library'), { mode: 0o700 });
+  const child = spawn(process.execPath, ['apps/collector/main.ts'], {
+    env: { ...process.env, HOME: home },
+    stdio: ['ignore', 'pipe', 'pipe'],
+  });
+  children.push(child);
+  try {
+    await new Promise<void>((resolve, reject) => {
+      const timeout = setTimeout(() => reject(new Error('daemon did not become ready')), 3000);
+      child.stdout!.once('data', () => { clearTimeout(timeout); resolve(); });
+      child.once('exit', code => { clearTimeout(timeout); reject(new Error(`daemon exited: ${code}`)); });
+    });
+    const support = join(home, 'Library', 'Application Support');
+    const directory = join(support, 'Abisso', 'runtime');
+    assert.equal(statSync(support).mode & 0o777, 0o700);
+    assert.equal(statSync(join(support, 'Abisso')).mode & 0o777, 0o700);
+    assert.equal(statSync(directory).mode & 0o777, 0o700);
+    const status = spawnSync(process.execPath, ['apps/collector/cli.ts', 'status'], {
+      env: { ...process.env, HOME: home }, encoding: 'utf8', timeout: 3000,
+    });
+    assert.equal(status.status, 0);
+    assert.deepEqual(JSON.parse(status.stdout), {
+      version: 1, state: 'inactive', enrollment: 'unenrolled', collection: 'stopped',
+    });
+  } finally {
+    await stop(child);
+  }
+});
+
+test('default runtime refuses symlinked or writable parent directories', () => {
+  for (const unsafe of ['symlink', 'writable_library', 'writable_support']) {
+    const home = mkdtempSync('/tmp/ab-');
+    roots.push(home);
+    chmodSync(home, 0o700);
+    const library = join(home, 'Library');
+    const support = join(library, 'Application Support');
+    mkdirSync(library, { mode: 0o700 });
+    if (unsafe === 'symlink') {
+      const target = join(home, 'target');
+      mkdirSync(target, { mode: 0o700 });
+      symlinkSync(target, support);
+    } else if (unsafe === 'writable_library') {
+      chmodSync(library, 0o777);
+    } else {
+      mkdirSync(support, { mode: 0o700 });
+      chmodSync(support, 0o777);
+    }
+    const result = spawnSync(process.execPath, ['apps/collector/main.ts'], {
+      env: { ...process.env, HOME: home }, encoding: 'utf8', timeout: 3000,
+    });
+    assert.notEqual(result.status, 0, unsafe);
+    assert.equal(result.stderr, 'collector_start_failed\n');
+  }
 });
 
 test('duplicate daemon fails and restart retains a working socket', async () => {

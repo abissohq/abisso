@@ -26,15 +26,25 @@ export function verifyRuntime(directory: string): void {
     || (parent.mode & 0o022) !== 0) throw new Error('unsafe_runtime_parent');
 }
 
+function ensureOwnedDirectory(path: string, errorCode: string): void {
+  try { mkdirSync(path, { mode: 0o700 }); } catch (error) {
+    if ((error as NodeJS.ErrnoException).code !== 'EEXIST') throw error;
+  }
+  const info = lstatSync(path);
+  if (!info.isDirectory() || info.isSymbolicLink() || info.uid !== userInfo().uid
+    || (info.mode & 0o022) !== 0) throw new Error(errorCode);
+}
+
 export function createRuntime(directory: string): void {
   const parent = dirname(directory);
   if (directory === runtimeDirectory()) {
-    const app = lstatSync(dirname(parent));
-    if (!app.isDirectory() || app.isSymbolicLink() || app.uid !== userInfo().uid
-      || (app.mode & 0o022) !== 0) throw new Error('unsafe_application_support');
-    try { mkdirSync(parent, { mode: 0o700 }); } catch (error) {
-      if ((error as NodeJS.ErrnoException).code !== 'EEXIST') throw error;
-    }
+    const home = homedir();
+    const homeInfo = lstatSync(home);
+    if (!homeInfo.isDirectory() || homeInfo.isSymbolicLink() || homeInfo.uid !== userInfo().uid
+      || (homeInfo.mode & 0o022) !== 0) throw new Error('unsafe_home_directory');
+    ensureOwnedDirectory(join(home, 'Library'), 'unsafe_library_directory');
+    ensureOwnedDirectory(dirname(parent), 'unsafe_application_support');
+    ensureOwnedDirectory(parent, 'unsafe_runtime_parent');
   }
   try { mkdirSync(directory, { mode: 0o700 }); } catch (error) {
     if ((error as NodeJS.ErrnoException).code !== 'EEXIST') throw error;
