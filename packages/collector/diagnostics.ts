@@ -1,4 +1,4 @@
-import { closeSync, constants, fstatSync, openSync, readFileSync, renameSync, statSync, unlinkSync, writeSync } from 'node:fs';
+import { closeSync, constants, fstatSync, ftruncateSync, openSync, readSync, renameSync, statSync, unlinkSync, writeSync } from 'node:fs';
 import { join } from 'node:path';
 import type { Status } from './ipc.ts';
 
@@ -28,34 +28,59 @@ function safeRecord(code: DiagnosticCode, hour: unknown, values: Record<string, 
   return result;
 }
 
-function readLog(directory: string, name: string): RecordShape[] {
-  let data: string;
-  try {
-    const fd = openSync(join(directory, name), constants.O_RDONLY | constants.O_NOFOLLOW);
-    try { data = readFileSync(fd, 'utf8'); } finally { closeSync(fd); }
+function validateLogFd(fd: number): void {
+  const info = fstatSync(fd);
+  if (!info.isFile() || info.uid !== process.getuid?.() || (info.mode & 0o777) !== 0o600) throw new Error('diagnostic_read_failed');
+  if (info.size > maximumLogBytes) throw new Error('diagnostic_scan_failed');
+}
+
+function readOpenedLog(fd: number): RecordShape[] {
+  validateLogFd(fd);
+  const buffer = Buffer.allocUnsafe(maximumLogBytes + 1);
+  let bytes = 0;
+  while (bytes < buffer.length) {
+    const count = readSync(fd, buffer, bytes, buffer.length - bytes, null);
+    if (!count) break;
+    bytes += count;
   }
-  catch (error) { if ((error as NodeJS.ErrnoException).code === 'ENOENT') return []; throw new Error('diagnostic_read_failed'); }
-  if (Buffer.byteLength(data) > maximumLogBytes) throw new Error('diagnostic_scan_failed');
-  return data.trim() ? data.trimEnd().split('\n').map(line => {
+  if (bytes > maximumLogBytes) throw new Error('diagnostic_scan_failed');
+  const data = buffer.toString('utf8', 0, bytes);
+  if (data && !data.endsWith('\n')) throw new Error('diagnostic_scan_failed');
+  return data ? data.slice(0, -1).split('\n').map(line => {
     let parsed: unknown;
     try { parsed = JSON.parse(line); } catch { throw new Error('diagnostic_scan_failed'); }
     if (!parsed || typeof parsed !== 'object' || Array.isArray(parsed)) throw new Error('diagnostic_scan_failed');
     const value = parsed as Record<string, unknown>;
     const cleaned = safeRecord(value.code as DiagnosticCode, value.hour, value);
-    if (JSON.stringify(value) !== JSON.stringify(cleaned)) throw new Error('diagnostic_scan_failed');
+    if (line !== JSON.stringify(cleaned)) throw new Error('diagnostic_scan_failed');
     return cleaned;
   }) : [];
+}
+
+function readLog(directory: string, name: string): RecordShape[] {
+  let fd: number;
+  try { fd = openSync(join(directory, name), constants.O_RDONLY | constants.O_NONBLOCK | constants.O_NOFOLLOW); }
+  catch (error) { if ((error as NodeJS.ErrnoException).code === 'ENOENT') return []; throw new Error('diagnostic_read_failed'); }
+  try { return readOpenedLog(fd); }
+  finally { closeSync(fd); }
 }
 
 export function pruneDiagnosticLogs(directory: string, maxAgeMs = retentionMs): void {
   const cutoffHour = Math.floor((Date.now() - maxAgeMs) / 3_600_000);
   for (const name of names) {
-    const rows = readLog(directory, name);
-    const retained = rows.filter(row => row.hour > cutoffHour);
-    if (retained.length === rows.length) continue;
-    if (!retained.length) { unlinkSync(join(directory, name)); continue; }
-    const fd = openSync(join(directory, name), constants.O_WRONLY | constants.O_TRUNC | constants.O_NOFOLLOW);
-    try { writeSync(fd, retained.map(row => JSON.stringify(row) + '\n').join('')); }
+    const path = join(directory, name);
+    let fd: number;
+    try { fd = openSync(path, constants.O_RDWR | constants.O_NONBLOCK | constants.O_NOFOLLOW); }
+    catch (error) { if ((error as NodeJS.ErrnoException).code === 'ENOENT') continue; throw new Error('diagnostic_read_failed'); }
+    try {
+      const rows = readOpenedLog(fd);
+      const retained = rows.filter(row => row.hour >= cutoffHour);
+      if (retained.length === rows.length) continue;
+      validateLogFd(fd);
+      if (!retained.length) { unlinkSync(path); continue; }
+      ftruncateSync(fd, 0);
+      writeSync(fd, retained.map(row => JSON.stringify(row) + '\n').join(''), 0, 'utf8');
+    }
     finally { closeSync(fd); }
   }
 }
@@ -70,11 +95,13 @@ export function createDiagnosticLog(directory: string, options: { maxBytes?: num
     record(code: DiagnosticCode, values: Record<string, unknown> = {}): void {
       pruneDiagnosticLogs(directory, maxAgeMs);
       const line = `${JSON.stringify(safeRecord(code, Math.floor(Date.now() / 3_600_000), values))}\n`;
+      const lineBytes = Buffer.byteLength(line);
+      if (lineBytes > maxBytes) throw new Error('diagnostic_write_failed');
       const path = join(directory, names[0]);
       let rotate = false;
       try {
         const info = statSync(path);
-        rotate = !info.isFile() || info.size + Buffer.byteLength(line) > maxBytes || Date.now() - info.mtimeMs > maxAgeMs;
+        rotate = !info.isFile() || info.size + lineBytes > maxBytes || Date.now() - info.mtimeMs > maxAgeMs;
       } catch (error) { if ((error as NodeJS.ErrnoException).code !== 'ENOENT') throw new Error('diagnostic_write_failed'); }
       if (rotate) {
         try { renameSync(path, join(directory, names[1])); }
@@ -83,7 +110,8 @@ export function createDiagnosticLog(directory: string, options: { maxBytes?: num
       const fd = openSync(path, constants.O_WRONLY | constants.O_CREAT | constants.O_APPEND | constants.O_NOFOLLOW, 0o600);
       try {
         const info = fstatSync(fd);
-        if (!info.isFile() || (info.mode & 0o777) !== 0o600) throw new Error('diagnostic_write_failed');
+        if (!info.isFile() || info.uid !== process.getuid?.() || (info.mode & 0o777) !== 0o600
+          || info.size + lineBytes > maxBytes) throw new Error('diagnostic_write_failed');
         writeSync(fd, line);
       } finally { closeSync(fd); }
     },
