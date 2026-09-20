@@ -10,14 +10,14 @@ export type Status = {
   collection: 'stopped';
 };
 
-export function parseRequest(value: unknown): 'status' | 'unsupported_version' | 'invalid_request' {
+export function parseRequest(value: unknown): 'status' | 'diagnostics_export' | 'unsupported_version' | 'invalid_request' {
   if (!value || typeof value !== 'object' || Array.isArray(value)) return 'invalid_request';
   const request = value as Record<string, unknown>;
   if (Object.keys(request).length !== 2 || !Object.hasOwn(request, 'version')
     || !Object.hasOwn(request, 'command')) return 'invalid_request';
   if (!Number.isInteger(request.version)) return 'invalid_request';
   if (request.version !== IPC_VERSION) return 'unsupported_version';
-  return request.command === 'status' ? 'status' : 'invalid_request';
+  return request.command === 'status' || request.command === 'diagnostics_export' ? request.command : 'invalid_request';
 }
 
 export const INACTIVE_STATUS: Status = {
