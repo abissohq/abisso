@@ -54,13 +54,84 @@ function App() {
     return () => { clearInterval(tick); stream.close(); sync.disconnected(); };
   }, [sync]);
   return h('main', null, h('h1', null, 'Abisso Live'), h('p', null, 'Needs Attention not evaluated in M0'),
-    h('a', { href: '/dev/login' }, 'Local synthetic sign in'), ' ', h('button', { onClick: () => sync.reread() }, 'Reread Live'),
+    h('a', { href: '/sign-in' }, 'Sign in or create workspace'), ' ',
+    document.body.dataset.localLogin === 'true' ? h('a', { href: '/dev/login' }, 'Local synthetic sign in') : null, ' ',
+    h('button', { onClick: () => sync.reread() }, 'Reread Live'),
     h('p', null, synchronized ? 'Live synchronized' : 'Live resynchronizing'),
     error ? h('p', { role: 'alert' }, error) : null, snapshot ? h(LiveView, { snapshot, now }) : null);
 }
+type BrowserState = { authenticated: boolean; workspace_id: string | null; csrf: string };
+type ClerkBrowser = { load(options: unknown): Promise<void>; session: { getToken(): Promise<string | null> } | null; mountSignIn(node: HTMLElement, options: unknown): void; signOut(): Promise<void> };
+declare global { interface Window { Clerk?: ClerkBrowser; __internal_ClerkUICtor?: unknown } }
+function SignInPage() {
+  const [state, setState] = useState<BrowserState | null>(null);
+  const [error, setError] = useState('');
+  const [working, setWorking] = useState(false);
+  useEffect(() => {
+    let active = true;
+    void (async () => {
+      const response = await fetch('/v1/browser/session', { credentials: 'same-origin' });
+      const initial = await response.json() as BrowserState;
+      if (!active) return;
+      const key = document.body.dataset.clerkKey;
+      if (!key) { setState(initial); if (!initial.authenticated) setError('Clerk sign in is not configured.'); return; }
+      const clerk = window.Clerk;
+      if (!clerk) throw new Error('clerk_unavailable');
+      await clerk.load({ ui: { ClerkUI: window.__internal_ClerkUICtor } });
+      if (!active) return;
+      if (!clerk.session) {
+        if (initial.authenticated) {
+          const logout = await fetch('/v1/browser/logout', { method: 'POST', credentials: 'same-origin',
+            headers: { 'content-type': 'application/json' }, body: JSON.stringify({ csrf: initial.csrf }) });
+          if (!logout.ok) throw new Error('logout_failed');
+          if (active) setState(await logout.json() as BrowserState);
+        } else setState(initial);
+        const mount = document.getElementById('clerk-sign-in');
+        if (mount) clerk.mountSignIn(mount, { forceRedirectUrl: '/sign-in', signUpForceRedirectUrl: '/sign-in', withSignUp: true });
+        return;
+      }
+      const token = await clerk.session.getToken();
+      if (!token) throw new Error('identity_unavailable');
+      const login = await fetch('/v1/browser/login', { method: 'POST', credentials: 'same-origin',
+        headers: { origin: location.origin, 'content-type': 'application/json' }, body: JSON.stringify({ csrf: initial.csrf, token }) });
+      if (!login.ok) throw new Error('login_failed');
+      if (active) setState(await login.json() as BrowserState);
+    })().catch(() => { if (active) setError('Sign in failed. Reload to try again.'); });
+    return () => { active = false; };
+  }, []);
+  async function create() {
+    if (!state) return;
+    setWorking(true);
+    try {
+      const response = await fetch('/v1/workspaces', { method: 'POST', credentials: 'same-origin',
+        headers: { origin: location.origin, 'content-type': 'application/json' }, body: JSON.stringify({ csrf: state.csrf }) });
+      if (!response.ok) throw new Error('workspace_creation_failed');
+      const result = await response.json() as { workspace_id: string };
+      setState({ ...state, workspace_id: result.workspace_id });
+    } catch { setError('Workspace creation failed. Reload to check your membership.'); }
+    finally { setWorking(false); }
+  }
+  async function signOut() {
+    if (!state) return;
+    setWorking(true);
+    try {
+      const response = await fetch('/v1/browser/logout', { method: 'POST', credentials: 'same-origin',
+        headers: { 'content-type': 'application/json' }, body: JSON.stringify({ csrf: state.csrf }) });
+      if (!response.ok) throw new Error('logout_failed');
+      await window.Clerk?.signOut();
+      window.location.assign('/sign-in');
+    } catch { setError('Sign out failed. Reload and try again.'); setWorking(false); }
+  }
+  return h('main', null, h('h1', null, 'Abisso'),
+    state?.workspace_id ? h('p', null, 'Workspace ready. ', h('a', { href: '/' }, 'Open Live')) :
+      state?.authenticated ? h('div', null, h('p', null, 'You have no workspace yet.'), h('button', { disabled: working, onClick: create }, 'Create workspace')) :
+        h('div', null, h('p', null, 'Sign in with Clerk to continue.'), h('div', { id: 'clerk-sign-in' })),
+    state?.authenticated ? h('button', { disabled: working, onClick: signOut }, 'Sign out') : null,
+    error ? h('p', { role: 'alert' }, error) : null);
+}
 if (typeof document !== 'undefined') {
   const root = document.getElementById('root');
-  if (root) createRoot(root).render(h(App));
+  if (root) createRoot(root).render(h(location.pathname === '/sign-in' ? SignInPage : App));
   const form = document.getElementById('login') as HTMLFormElement | null;
   form?.addEventListener('submit', async event => {
     event.preventDefault();
