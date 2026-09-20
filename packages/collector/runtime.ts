@@ -100,5 +100,10 @@ export function acquireLock(directory: string): () => void {
   } finally {
     closeSync(fd);
   }
-  return () => unlinkSync(path);
+  let released = false;
+  return () => {
+    if (released) return;
+    released = true;
+    unlinkSync(path);
+  };
 }

@@ -37,6 +37,12 @@ function serve(socket: Socket): void {
 
 let unlock: (() => void) | undefined;
 let socketPath: string | undefined;
+const releaseLock = () => {
+  try { unlock?.(); } catch {
+    process.stderr.write('collector_cleanup_failed\n');
+    process.exitCode = 1;
+  }
+};
 try {
   const { directory, rest } = selectedRuntimeDirectory(process.argv.slice(2));
   if (rest.length) throw new Error('invalid_arguments');
@@ -46,12 +52,12 @@ try {
   const server = createServer(serve);
   const cleanup = () => {
     try { if (socketPath && lstatSync(socketPath).isSocket()) unlinkSync(socketPath); } catch {}
-    unlock?.();
+    releaseLock();
   };
   server.on('error', () => {
     process.stderr.write('collector_start_failed\n');
     process.exitCode = 1;
-    unlock?.();
+    releaseLock();
   });
   server.listen(socketPath, () => {
     try {
@@ -67,7 +73,7 @@ try {
   process.on('SIGTERM', shutdown);
   process.on('SIGINT', shutdown);
 } catch {
-  unlock?.();
+  releaseLock();
   process.stderr.write('collector_start_failed\n');
   process.exitCode = 1;
 }
