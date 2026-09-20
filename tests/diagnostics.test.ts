@@ -83,28 +83,32 @@ test('diagnostic read rejects a file owned by another uid', () => {
   assert.equal(result.status, 0);
 });
 
-test('prune does not truncate a file substituted after validation', () => {
+test('prune mutates only the validated descriptor when the named file is replaced', () => {
   const root = directory();
   const path = join(root, 'diagnostics.0.log');
-  const hour = Math.floor(Date.now() / 3_600_000);
-  writeFileSync(path, `${JSON.stringify({ code: 'collector_ready', hour: hour - 2 })}\n${JSON.stringify({ code: 'ipc_rejected', hour })}\n`, { mode: 0o600 });
+  writeFileSync(path, `${JSON.stringify({ code: 'collector_ready', hour: 0 })}\n`, { mode: 0o600 });
   const script = `import fs from 'node:fs';
     import { syncBuiltinESMExports } from 'node:module';
-    const original = fs.openSync;
-    let substituted = false;
-    fs.openSync = (...args) => {
-      if (args[1] & fs.constants.O_TRUNC) {
-        substituted = true;
-        fs.chmodSync(process.argv[1], 0o644);
+    const original = fs.fstatSync;
+    const path = process.argv[1];
+    const backup = path + '.old';
+    const replacement = 'replacement must survive';
+    let validations = 0;
+    fs.fstatSync = (...args) => {
+      const info = original(...args);
+      if (++validations === 2) {
+        fs.renameSync(path, backup);
+        fs.writeFileSync(path, replacement, { mode: 0o644 });
       }
-      return original(...args);
+      return info;
     };
     syncBuiltinESMExports();
     const { pruneDiagnosticLogs } = await import('./packages/collector/diagnostics.ts?prune-race-test');
-    try { pruneDiagnosticLogs(process.argv[2], 3_600_000); process.exit(substituted ? 2 : 0); }
-    catch { process.exit(0); }`;
-  const result = spawnSync(process.execPath, ['--input-type=module', '-e', script, path, root], { timeout: 1000 });
-  assert.equal(result.status, 0, 'prune truncated a changed file');
+    pruneDiagnosticLogs(process.argv[2]);
+    if (validations !== 2 || fs.readFileSync(path, 'utf8') !== replacement ||
+        (fs.statSync(path).mode & 0o777) !== 0o644 || fs.statSync(backup).size !== 0) process.exit(2);`;
+  const result = spawnSync(process.execPath, ['--input-type=module', '-e', script, path, root], { encoding: 'utf8', timeout: 1000 });
+  assert.equal(result.status, 0, result.stderr || 'prune mutated a replacement file');
 });
 
 test('prune rechecks file mode immediately before truncation', () => {
@@ -218,7 +222,32 @@ test('export removes expired records from both local log files', () => {
   }
   const exported = exportDiagnostics(root, { version: 1, state: 'inactive', enrollment: 'unenrolled', collection: 'stopped' });
   assert.deepEqual(JSON.parse(exported).logs, []);
-  assert.deepEqual(readdirSync(root), []);
+  assert.deepEqual(readdirSync(root), ['diagnostics.0.log', 'diagnostics.1.log']);
+  for (const name of readdirSync(root)) {
+    const info = statSync(join(root, name));
+    assert.equal(info.size, 0);
+    assert.equal(info.mode & 0o777, 0o600);
+    assert.equal(info.uid, process.getuid?.());
+  }
+});
+
+test('configured cap rejects a prune rewrite before changing either named file', () => {
+  const hour = Math.floor(Date.now() / 3_600_000);
+  const row = (value: number) => `${JSON.stringify({ code: 'collector_ready', hour: value })}\n`;
+  const original = row(hour - 200) + row(hour).repeat(4);
+  assert.ok(Buffer.byteLength(row(hour).repeat(4)) > 128);
+  for (const operation of ['startup', 'prune', 'record']) {
+    const root = directory();
+    const path = join(root, 'diagnostics.0.log');
+    const log = operation === 'startup' ? undefined : createDiagnosticLog(root, { maxBytes: 128 });
+    writeFileSync(path, original, { mode: 0o600 });
+    assert.throws(() => {
+      if (operation === 'startup') createDiagnosticLog(root, { maxBytes: 128 });
+      else if (operation === 'prune') log!.prune();
+      else log!.record('ipc_rejected');
+    }, /diagnostic_write_failed/);
+    assert.equal(readFileSync(path, 'utf8'), original, `${operation} changed the log before checking the cap`);
+  }
 });
 
 test('seven-day pruning keeps the cutoff hour and removes older hours in both files', () => {

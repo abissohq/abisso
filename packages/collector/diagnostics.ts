@@ -1,4 +1,4 @@
-import { closeSync, constants, fstatSync, ftruncateSync, openSync, readSync, renameSync, statSync, unlinkSync, writeSync } from 'node:fs';
+import { closeSync, constants, fstatSync, ftruncateSync, openSync, readSync, renameSync, statSync, writeSync } from 'node:fs';
 import { join } from 'node:path';
 import type { Status } from './ipc.ts';
 
@@ -65,7 +65,8 @@ function readLog(directory: string, name: string): RecordShape[] {
   finally { closeSync(fd); }
 }
 
-export function pruneDiagnosticLogs(directory: string, maxAgeMs = retentionMs): void {
+export function pruneDiagnosticLogs(directory: string, maxAgeMs = retentionMs, maxBytes = maximumLogBytes): void {
+  if (!Number.isInteger(maxBytes) || maxBytes < 128 || maxBytes > maximumLogBytes) throw new Error('invalid_diagnostic_limits');
   const cutoffHour = Math.floor((Date.now() - maxAgeMs) / 3_600_000);
   for (const name of names) {
     const path = join(directory, name);
@@ -76,10 +77,11 @@ export function pruneDiagnosticLogs(directory: string, maxAgeMs = retentionMs): 
       const rows = readOpenedLog(fd);
       const retained = rows.filter(row => row.hour >= cutoffHour);
       if (retained.length === rows.length) continue;
+      const content = retained.map(row => JSON.stringify(row) + '\n').join('');
+      if (Buffer.byteLength(content) > maxBytes) throw new Error('diagnostic_write_failed');
       validateLogFd(fd);
-      if (!retained.length) { unlinkSync(path); continue; }
       ftruncateSync(fd, 0);
-      writeSync(fd, retained.map(row => JSON.stringify(row) + '\n').join(''), 0, 'utf8');
+      if (content) writeSync(fd, content, 0, 'utf8');
     }
     finally { closeSync(fd); }
   }
@@ -89,11 +91,11 @@ export function createDiagnosticLog(directory: string, options: { maxBytes?: num
   const maxBytes = options.maxBytes ?? maximumLogBytes;
   const maxAgeMs = options.maxAgeMs ?? retentionMs;
   if (!Number.isInteger(maxBytes) || maxBytes < 128 || maxBytes > maximumLogBytes || !Number.isInteger(maxAgeMs) || maxAgeMs < 1) throw new Error('invalid_diagnostic_limits');
-  pruneDiagnosticLogs(directory, maxAgeMs);
+  pruneDiagnosticLogs(directory, maxAgeMs, maxBytes);
   return {
-    prune: () => pruneDiagnosticLogs(directory, maxAgeMs),
+    prune: () => pruneDiagnosticLogs(directory, maxAgeMs, maxBytes),
     record(code: DiagnosticCode, values: Record<string, unknown> = {}): void {
-      pruneDiagnosticLogs(directory, maxAgeMs);
+      pruneDiagnosticLogs(directory, maxAgeMs, maxBytes);
       const line = `${JSON.stringify(safeRecord(code, Math.floor(Date.now() / 3_600_000), values))}\n`;
       const lineBytes = Buffer.byteLength(line);
       if (lineBytes > maxBytes) throw new Error('diagnostic_write_failed');
