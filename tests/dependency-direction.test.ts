@@ -96,3 +96,66 @@ test('type-only and dynamic imports cannot bypass the boundary', () => {
   assert.match(result.stderr, /contracts\/types.ts/);
   assert.match(result.stderr, /collector\/main.ts/);
 });
+
+test('long export-from declaration cannot bypass the contracts boundary', () => {
+  const specifiers = Array.from({ length: 110 }, (_, index) => `value as value${index}`).join(',\n');
+  const root = fixture({
+    'packages/contracts/exports.ts': `export {\n${specifiers}\n} from '../database/secret.ts';`,
+    'packages/database/secret.ts': 'export const value = 1;',
+  });
+  const result = check(root);
+  assert.notEqual(result.status, 0, result.stdout);
+  assert.match(result.stderr, /contracts\/exports.ts.*database\/secret.ts/);
+});
+
+test('collector cannot reach database through a NodeNext .mts intermediate', () => {
+  const root = fixture({
+    'apps/collector/main.mts': "import '../../packages/domain/bridge.mjs';",
+    'packages/domain/bridge.mts': "import '../database/database.mjs';",
+    'packages/database/database.mts': 'export {};',
+  });
+  const result = check(root);
+  assert.notEqual(result.status, 0, result.stdout);
+  assert.match(result.stderr, /collector\/main.mts.*domain\/bridge.mts.*database\/database.mjs/);
+});
+
+test('NodeNext and JavaScript runtime extensions resolve through intermediate source files', () => {
+  for (const [runtimeExtension, sourceExtension] of [
+    ['.cjs', '.cts'], ['.js', '.ts'], ['.jsx', '.tsx'],
+  ]) {
+    const root = fixture({
+      'apps/collector/main.ts': `require('../../packages/domain/bridge${runtimeExtension}');`,
+      [`packages/domain/bridge${sourceExtension}`]: "import '../database/database.ts';",
+      'packages/database/database.ts': 'export {};',
+    });
+    const result = check(root);
+    assert.notEqual(result.status, 0, `${runtimeExtension}: ${result.stdout}`);
+    assert.match(result.stderr, new RegExp(`domain/bridge\\${sourceExtension}.*database/database.ts`));
+  }
+});
+
+test('extensionless index imports still resolve transitively', () => {
+  const root = fixture({
+    'apps/collector/main.ts': "import '../../packages/domain/bridge';",
+    'packages/domain/bridge/index.ts': "import '../../database/database.ts';",
+    'packages/database/database.ts': 'export {};',
+  });
+  const result = check(root);
+  assert.notEqual(result.status, 0, result.stdout);
+  assert.match(result.stderr, /domain\/bridge\/index.ts.*database\/database.ts/);
+});
+
+test('type and star re-exports expose forbidden dependencies', () => {
+  for (const declaration of [
+    "export type { Secret } from '../database/secret.ts';",
+    "export * from '../database/secret.ts';",
+  ]) {
+    const root = fixture({
+      'packages/contracts/exports.ts': declaration,
+      'packages/database/secret.ts': 'export type Secret = string;',
+    });
+    const result = check(root);
+    assert.notEqual(result.status, 0, result.stdout);
+    assert.match(result.stderr, /contracts\/exports.ts.*database\/secret.ts/);
+  }
+});

@@ -65,6 +65,16 @@ for (const file of sourceRoots.flatMap(part => files(join(root, part)))) {
       failures.push(`${from}:${line}: import escapes repository: ${value}`);
     } else imports.push({ to, line });
   }
+  function fromClause(index: number): number | undefined {
+    let braces = 0;
+    for (let j = index; j < tokens.length; j++) {
+      const kind = tokens[j].kind;
+      if (kind === SyntaxKind.OpenBraceToken) braces++;
+      else if (kind === SyntaxKind.CloseBraceToken) braces--;
+      else if (braces === 0 && kind === SyntaxKind.FromKeyword) return j + 1;
+      else if (braces === 0 && kind === SyntaxKind.SemicolonToken) return;
+    }
+  }
   for (let i = 0; i < tokens.length; i++) {
     const token = tokens[i];
     if ((token.kind === SyntaxKind.ImportKeyword || token.value === 'require') && tokens[i + 1]?.kind === SyntaxKind.OpenParenToken) {
@@ -76,16 +86,20 @@ for (const file of sourceRoots.flatMap(part => files(join(root, part)))) {
       inspect(i + 1, i);
       continue;
     }
-    for (let j = i + 1; j < Math.min(i + 100, tokens.length); j++) {
-      if (tokens[j].kind === SyntaxKind.FromKeyword) { inspect(j + 1, i); break; }
-      if (tokens[j].kind === SyntaxKind.SemicolonToken) break;
-    }
+    const first = tokens[i + 1];
+    const startsReExport = first?.kind === SyntaxKind.AsteriskToken
+      || first?.kind === SyntaxKind.OpenBraceToken
+      || (first?.value === 'type' && [SyntaxKind.AsteriskToken, SyntaxKind.OpenBraceToken].includes(tokens[i + 2]?.kind));
+    if (token.kind === SyntaxKind.ExportKeyword && !startsReExport) continue;
+    const specifier = fromClause(i + 1);
+    if (specifier !== undefined) inspect(specifier, i);
   }
 }
 
 function sourceFile(path: string): string | undefined {
   const candidates = [path, `${path}.ts`, `${path}.tsx`, `${path}/index.ts`,
-    path.replace(/\.js$/, '.ts'), path.replace(/\.jsx$/, '.tsx')];
+    path.replace(/\.js$/, '.ts'), path.replace(/\.jsx$/, '.tsx'),
+    path.replace(/\.mjs$/, '.mts'), path.replace(/\.cjs$/, '.cts')];
   return candidates.find(candidate => dependencies.has(candidate));
 }
 
