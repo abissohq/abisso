@@ -445,7 +445,7 @@ test('tenant/source attacks reveal no foreign ownership and cannot enter accepte
   const source = randomUUID();
   await db.query('INSERT INTO workspaces VALUES ($1,true)', [workspace]);
   await db.query('INSERT INTO users VALUES ($1,true)', [user]);
-  await db.query('INSERT INTO memberships VALUES ($1,$2,true)', [user, workspace]);
+  await db.query('INSERT INTO memberships (user_id, workspace_id, active) VALUES ($1,$2,true)', [user, workspace]);
   await db.query('INSERT INTO machines VALUES ($1,$2,$3,true)', [machine, workspace, user]);
   await db.query("INSERT INTO sources VALUES ($1,$2,$3,$4,'abisso','synthetic_m0',true)", [source, machine, workspace, user]);
   const event = quarantineBatch().events[0];

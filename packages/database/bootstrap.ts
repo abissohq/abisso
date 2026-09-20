@@ -23,7 +23,7 @@ export async function bootstrapSynthetic(db: pg.Pool, environment: string) {
   await transaction(db, async client => {
     await client.query('INSERT INTO workspaces VALUES ($1, true) ON CONFLICT DO NOTHING', [synthetic.workspace]);
     await client.query('INSERT INTO users VALUES ($1, true) ON CONFLICT DO NOTHING', [synthetic.user]);
-    await client.query('INSERT INTO memberships VALUES ($1, $2, true) ON CONFLICT DO NOTHING', [synthetic.user, synthetic.workspace]);
+    await client.query('INSERT INTO memberships (user_id, workspace_id, active) VALUES ($1, $2, true) ON CONFLICT DO NOTHING', [synthetic.user, synthetic.workspace]);
     await client.query('INSERT INTO machines VALUES ($1, $2, $3, true) ON CONFLICT DO NOTHING', [synthetic.machine, synthetic.workspace, synthetic.user]);
     await client.query("INSERT INTO sources VALUES ($1, $2, $3, $4, 'abisso', 'synthetic_m0', true) ON CONFLICT DO NOTHING", [synthetic.source, synthetic.machine, synthetic.workspace, synthetic.user]);
     await client.query('INSERT INTO workspace_policies VALUES ($1, $2, true) ON CONFLICT DO NOTHING', [synthetic.workspace, synthetic.policy]);
