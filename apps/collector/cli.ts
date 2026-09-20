@@ -2,7 +2,23 @@ import { createConnection } from 'node:net';
 import { INACTIVE_STATUS, IPC_VERSION, MAX_REQUEST_BYTES } from '../../packages/collector/ipc.ts';
 import { selectedRuntimeDirectory, verifySocket } from '../../packages/collector/runtime.ts';
 import { MAX_DIAGNOSTIC_EXPORT_BYTES, scanDiagnostics } from '../../packages/collector/diagnostics.ts';
+import { spawnSync } from 'node:child_process';
+import { enrollMachine } from '../../packages/collector/enrollment.ts';
+import { keychainStore } from '../../packages/collector/keychain.ts';
 
+if (process.argv[2] === 'enroll') {
+  try {
+    if (process.argv.length !== 4) throw new Error('invalid_arguments');
+    await enrollMachine(process.argv[3], keychainStore, url => {
+      const opened = spawnSync('/usr/bin/open', [url], { stdio: 'ignore' });
+      if (opened.status !== 0) throw new Error('browser_unavailable');
+    });
+    process.stdout.write('enrolled\n');
+  } catch {
+    process.stderr.write('enrollment_failed\n');
+    process.exitCode = 1;
+  }
+} else {
 try {
   const selected = selectedRuntimeDirectory(process.argv.slice(2));
   const versionAt = selected.rest.indexOf('--ipc-version');
@@ -58,4 +74,5 @@ try {
 } catch {
   process.stderr.write('cli_failed\n');
   process.exitCode = 1;
+}
 }

@@ -24,7 +24,7 @@ export async function transaction<T>(db: pg.Pool, run: (client: pg.PoolClient) =
 }
 
 export async function migrate(db: pg.Pool) {
-  const migrations = ['001-ingestion.sql', '002-session-start.sql', '003-mixed-batch.sql', '004-worker-recovery.sql', '005-browser-identity.sql'];
+  const migrations = ['001-ingestion.sql', '002-session-start.sql', '003-mixed-batch.sql', '004-worker-recovery.sql', '005-browser-identity.sql', '006-machine-enrollment.sql'];
   await transaction(db, async client => {
     await client.query("SELECT pg_advisory_xact_lock(182305, 1)");
     await client.query('CREATE TABLE IF NOT EXISTS schema_migrations (version integer PRIMARY KEY)');

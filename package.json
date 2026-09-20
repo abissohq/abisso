@@ -16,6 +16,7 @@
     "worker": "node apps/worker/main.ts",
     "collector:daemon": "node apps/collector/main.ts",
     "collector:cli": "node apps/collector/cli.ts",
+    "collector:keychain:build": "node tooling/build-keychain-helper.ts",
     "test:collector": "node --test tests/collector-ipc.test.ts",
     "demo:capability": "node tooling/demo.ts",
     "typecheck": "tsc",
