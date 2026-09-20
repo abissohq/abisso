@@ -5,17 +5,29 @@ import type { BrowserIdentityVerifier } from '../../packages/browser/clerk.ts';
 import { clerkBrowserScripts } from '../../packages/browser/clerk.ts';
 import { authorizedWorkspace, readLive } from '../../packages/live/read.ts';
 import { Realtime } from '../../packages/live/realtime.ts';
-import { createServer } from 'node:http';
+import { createServer, type IncomingMessage } from 'node:http';
 import { gunzipSync } from 'node:zlib';
 import type pg from 'pg';
 import { RequestFailure } from '../../packages/contracts/capability.ts';
 import { ingest } from '../../packages/ingestion/ingest.ts';
 import { limits, parseCanonicalJson } from '../../packages/contracts/json.ts';
 import { purgeExpiredQuarantine } from '../../packages/ingestion/quarantine-repository.ts';
+import { issueEnrollmentCode, redeemEnrollmentCode } from '../../packages/browser/enrollment.ts';
+import { machineSelf } from '../../packages/ingestion/machine-self.ts';
 
-const safeErrorCodes = new Set(['admission_limit', 'csrf_invalid', 'hard_limit', 'inactive_authority', 'internal_error', 'invalid_compressed_body', 'invalid_credentials', 'invalid_form', 'invalid_identity', 'invalid_json', 'login_invalid', 'login_unavailable', 'malformed_wrapper', 'membership_conflict', 'not_found', 'origin_invalid', 'realtime_degraded', 'request_expired', 'unauthenticated', 'unsupported_encoding']);
+const safeErrorCodes = new Set(['admission_limit', 'csrf_invalid', 'enrollment_invalid', 'hard_limit', 'inactive_authority', 'installation_conflict', 'internal_error', 'invalid_compressed_body', 'invalid_credentials', 'invalid_enrollment', 'invalid_form', 'invalid_identity', 'invalid_json', 'login_invalid', 'login_unavailable', 'malformed_wrapper', 'membership_conflict', 'not_found', 'origin_invalid', 'realtime_degraded', 'request_expired', 'unauthenticated', 'unsupported_encoding']);
 
-export function createApi(db: pg.Pool, options: { environment?: string; origin?: string; secureCookies?: boolean; browserIdentity?: BrowserIdentityVerifier; clerkPublishableKey?: string; diagnosticLog?: (line: string) => void } = {}) {
+async function boundedJsonObject(request: IncomingMessage, errorCode: string): Promise<Record<string, unknown>> {
+  if (request.headers['content-type']?.split(';')[0] !== 'application/json') throw new RequestFailure(400, errorCode);
+  let body = '';
+  for await (const chunk of request) { body += chunk; if (Buffer.byteLength(body) > 2048) throw new RequestFailure(413, 'hard_limit'); }
+  let input: unknown;
+  try { input = JSON.parse(body); } catch { throw new RequestFailure(400, errorCode); }
+  if (!input || typeof input !== 'object' || Array.isArray(input)) throw new RequestFailure(400, errorCode);
+  return input as Record<string, unknown>;
+}
+
+export function createApi(db: pg.Pool, options: { environment?: string; origin?: string; secureCookies?: boolean; browserIdentity?: BrowserIdentityVerifier; clerkPublishableKey?: string; diagnosticLog?: (line: string) => void; refreshHashKey?: string } = {}) {
   let ingesting = 0;
   const realtime = new Realtime(db);
   const server = createServer(async (request, response) => {
@@ -30,10 +42,10 @@ export function createApi(db: pg.Pool, options: { environment?: string; origin?:
     response.setHeader('content-security-policy', "default-src 'self'; frame-ancestors 'none'; form-action 'self'");
     try {
       const path = new URL(request.url!, 'http://localhost');
-      if (request.method === 'GET' && (request.url === '/' || request.url === '/sign-in')) {
+      if (request.method === 'GET' && (request.url === '/' || request.url === '/sign-in' || path.pathname === '/enroll')) {
         response.setHeader('content-type', 'text/html; charset=utf-8');
         const key = options.clerkPublishableKey?.replaceAll('&', '&amp;').replaceAll('"', '&quot;').replaceAll('<', '&lt;') ?? '';
-        const clerk = request.url === '/sign-in' ? clerkBrowserScripts(options.clerkPublishableKey) : { scripts: '', origin: '' };
+        const clerk = request.url === '/sign-in' || path.pathname === '/enroll' ? clerkBrowserScripts(options.clerkPublishableKey) : { scripts: '', origin: '' };
         const clerkOrigin = clerk.origin ? ` ${clerk.origin}` : '';
         response.setHeader('content-security-policy', `default-src 'self'; script-src 'self'${clerkOrigin}; connect-src 'self'${clerkOrigin}; frame-src${clerkOrigin || " 'none'"}; img-src 'self' https: data:; style-src 'self' 'unsafe-inline'; frame-ancestors 'none'; form-action 'self'`);
         response.end(`<!doctype html><html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>Abisso Live</title></head><body data-clerk-key="${key}" data-local-login="${['development', 'test'].includes(options.environment ?? '')}"><div id="root"></div>${clerk.scripts}<script src="/assets/live.js" defer></script></body></html>`);
@@ -51,6 +63,28 @@ export function createApi(db: pg.Pool, options: { environment?: string; origin?:
         if (issued) response.setHeader('set-cookie', [sessionCookie(issued.token, options.secureCookies ?? false, 900), csrfCookie(issued.csrf, options.secureCookies ?? false)]);
         const workspace = existing?.user_id ? await currentWorkspace(db, existing.user_id) : undefined;
         response.end(JSON.stringify({ authenticated: Boolean(existing?.user_id), workspace_id: workspace?.workspace_id ?? null, role: workspace?.role ?? null, csrf: (existing ?? issued)!.csrf }));
+        return;
+      }
+      if (request.method === 'POST' && path.pathname === '/v1/machines/enrollment-codes' && !path.search) {
+        const origin = options.origin ?? `http://${request.headers.host}`;
+        if (request.headers.origin !== origin || request.headers.host !== new URL(origin).host) throw new RequestFailure(403, 'origin_invalid');
+        const fields = await boundedJsonObject(request, 'invalid_form');
+        if (typeof fields.csrf !== 'string') throw new RequestFailure(403, 'csrf_invalid');
+        const issued = await issueEnrollmentCode(db, request.headers.cookie, fields.csrf, fields);
+        response.writeHead(201).end(JSON.stringify(issued));
+        return;
+      }
+      if (request.method === 'POST' && path.pathname === '/v1/machines/enrollment-exchanges' && !path.search) {
+        // The collector exchanges directly with the HTTPS API. Browser cookies and origins are not authority here.
+        if (request.headers.cookie || request.headers.origin) throw new RequestFailure(403, 'enrollment_invalid');
+        const input = await boundedJsonObject(request, 'invalid_enrollment');
+        if (!options.refreshHashKey) throw new RequestFailure(503, 'internal_error');
+        const result = await redeemEnrollmentCode(db, input, options.refreshHashKey);
+        response.end(JSON.stringify(result));
+        return;
+      }
+      if (request.method === 'GET' && path.pathname === '/v1/machines/self' && !path.search) {
+        response.end(JSON.stringify(await machineSelf(db, request.headers.authorization)));
         return;
       }
       if (request.method === 'POST' && ['/v1/browser/login', '/v1/browser/logout', '/v1/workspaces'].includes(path.pathname) && !path.search) {

@@ -6,7 +6,7 @@ export type Source = { id: string; provider: string; adapter_name: string; activ
 export async function currentCredential(client: pg.PoolClient, digest: string) {
   return (await client.query<{ machine_id: string }>(
     `SELECT machine_id FROM machine_credentials WHERE digest = $1 AND NOT revoked
-     AND audience = 'telemetry:ingest' AND expires_at > clock_timestamp() FOR SHARE`, [digest],
+     AND audience IN ('telemetry:ingest', 'machine:access') AND expires_at > clock_timestamp() FOR SHARE`, [digest],
   )).rows[0];
 }
 

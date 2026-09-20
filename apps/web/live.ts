@@ -67,6 +67,8 @@ function SignInPage() {
   const [state, setState] = useState<BrowserState | null>(null);
   const [error, setError] = useState('');
   const [working, setWorking] = useState(false);
+  const [machineName, setMachineName] = useState('');
+  const enrolling = location.pathname === '/enroll';
   useEffect(() => {
     let active = true;
     void (async () => {
@@ -122,8 +124,34 @@ function SignInPage() {
       window.location.assign('/sign-in');
     } catch { setError('Sign out failed. Reload and try again.'); setWorking(false); }
   }
+  async function confirmEnrollment() {
+    if (!state?.workspace_id) return;
+    setWorking(true);
+    try {
+      const query = new URLSearchParams(location.search);
+      const redirect = query.get('redirect_uri');
+      const challenge = query.get('challenge');
+      const handoffState = query.get('state');
+      if (!redirect || !challenge || !handoffState || query.get('scope') !== 'telemetry:write machine:self') throw new Error('invalid_request');
+      const response = await fetch('/v1/machines/enrollment-codes', { method: 'POST', credentials: 'same-origin',
+        headers: { origin: location.origin, 'content-type': 'application/json' },
+        body: JSON.stringify({ csrf: state.csrf, workspace_id: state.workspace_id, redirect_uri: redirect,
+          challenge, display_name: machineName, scope: 'telemetry:write machine:self' }) });
+      if (!response.ok) throw new Error('issue_failed');
+      const issued = await response.json() as { code: string; redirect_uri: string };
+      const callback = new URL(issued.redirect_uri);
+      callback.searchParams.set('code', issued.code);
+      callback.searchParams.set('state', handoffState);
+      location.assign(callback.toString());
+    } catch { setError('Machine enrollment failed. Start again from the collector.'); setWorking(false); }
+  }
   return h('main', null, h('h1', null, 'Abisso'),
-    state?.workspace_id ? h('p', null, 'Workspace ready. ', h('a', { href: '/' }, 'Open Live')) :
+    state?.workspace_id ? enrolling ? h('section', null,
+      h('p', null, `Authorize this collector for workspace ${state.workspace_id}.`),
+      h('p', null, 'Scope: telemetry write and machine self-service.'),
+      h('label', null, 'Machine name ', h('input', { value: machineName, maxLength: 80, onChange: (event: { target: { value: string } }) => setMachineName(event.target.value) })),
+      h('button', { disabled: working || !machineName.trim(), onClick: confirmEnrollment }, 'Authorize machine'))
+      : h('p', null, 'Workspace ready. ', h('a', { href: '/' }, 'Open Live')) :
       state?.authenticated ? h('div', null, h('p', null, 'You have no workspace yet.'), h('button', { disabled: working, onClick: create }, 'Create workspace')) :
         h('div', null, h('p', null, 'Sign in with Clerk to continue.'), h('div', { id: 'clerk-sign-in' })),
     state?.authenticated ? h('button', { disabled: working, onClick: signOut }, 'Sign out') : null,
@@ -131,7 +159,7 @@ function SignInPage() {
 }
 if (typeof document !== 'undefined') {
   const root = document.getElementById('root');
-  if (root) createRoot(root).render(h(location.pathname === '/sign-in' ? SignInPage : App));
+  if (root) createRoot(root).render(h(location.pathname === '/sign-in' || location.pathname === '/enroll' ? SignInPage : App));
   const form = document.getElementById('login') as HTMLFormElement | null;
   form?.addEventListener('submit', async event => {
     event.preventDefault();
