@@ -32,6 +32,7 @@
     "demo:heartbeat": "node tooling/demo-start.ts"
   },
   "dependencies": {
+    "@clerk/backend": "^3.18.1",
     "canonicalize": "^5.0.0",
     "pg": "^8.23.0",
     "react": "^19.3.0",

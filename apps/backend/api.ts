@@ -1,5 +1,7 @@
 import { readFile } from 'node:fs/promises';
-import { beginLogin, syntheticLogin, sessionCookie } from '../../packages/browser/authentication.ts';
+import { beginLogin, browserSession, clerkLogin, createWorkspace, currentWorkspace, csrfCookie, logoutBrowser, sessionCookie, syntheticLogin } from '../../packages/browser/authentication.ts';
+import type { BrowserIdentityVerifier } from '../../packages/browser/clerk.ts';
+import { clerkBrowserScripts } from '../../packages/browser/clerk.ts';
 import { authorizedWorkspace, readLive } from '../../packages/live/read.ts';
 import { Realtime } from '../../packages/live/realtime.ts';
 import { createServer } from 'node:http';
@@ -10,7 +12,7 @@ import { ingest } from '../../packages/ingestion/ingest.ts';
 import { limits, parseCanonicalJson } from '../../packages/contracts/json.ts';
 import { purgeExpiredQuarantine } from '../../packages/ingestion/quarantine-repository.ts';
 
-export function createApi(db: pg.Pool, options: { environment?: string; origin?: string; secureCookies?: boolean } = {}) {
+export function createApi(db: pg.Pool, options: { environment?: string; origin?: string; secureCookies?: boolean; browserIdentity?: BrowserIdentityVerifier; clerkPublishableKey?: string } = {}) {
   let ingesting = 0;
   const realtime = new Realtime(db);
   const server = createServer(async (request, response) => {
@@ -22,14 +24,58 @@ export function createApi(db: pg.Pool, options: { environment?: string; origin?:
     response.setHeader('content-security-policy', "default-src 'self'; frame-ancestors 'none'; form-action 'self'");
     try {
       const path = new URL(request.url!, 'http://localhost');
-      if (request.method === 'GET' && request.url === '/') {
+      if (request.method === 'GET' && (request.url === '/' || request.url === '/sign-in')) {
         response.setHeader('content-type', 'text/html; charset=utf-8');
-        response.end('<!doctype html><html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>Abisso Live</title></head><body><div id="root"></div><script src="/assets/live.js" defer></script></body></html>');
+        const key = options.clerkPublishableKey?.replaceAll('&', '&amp;').replaceAll('"', '&quot;').replaceAll('<', '&lt;') ?? '';
+        const clerk = request.url === '/sign-in' ? clerkBrowserScripts(options.clerkPublishableKey) : { scripts: '', origin: '' };
+        const clerkOrigin = clerk.origin ? ` ${clerk.origin}` : '';
+        response.setHeader('content-security-policy', `default-src 'self'; script-src 'self'${clerkOrigin}; connect-src 'self'${clerkOrigin}; frame-src${clerkOrigin || " 'none'"}; img-src 'self' https: data:; style-src 'self' 'unsafe-inline'; frame-ancestors 'none'; form-action 'self'`);
+        response.end(`<!doctype html><html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>Abisso Live</title></head><body data-clerk-key="${key}" data-local-login="${['development', 'test'].includes(options.environment ?? '')}"><div id="root"></div>${clerk.scripts}<script src="/assets/live.js" defer></script></body></html>`);
         return;
       }
       if (request.method === 'GET' && request.url === '/assets/live.js') {
         response.setHeader('content-type', 'text/javascript; charset=utf-8');
         response.end(await readFile(new URL('../web/dist/live.js', import.meta.url)));
+        return;
+      }
+      if (request.method === 'GET' && path.pathname === '/v1/browser/session' && !path.search) {
+        const csrfValue = request.headers.cookie?.split(';').map(value => value.trim()).find(value => value.startsWith('abisso_csrf='));
+        const existing = await browserSession(db, request.headers.cookie, csrfValue);
+        const issued = existing ? null : await beginLogin(db);
+        if (issued) response.setHeader('set-cookie', [sessionCookie(issued.token, options.secureCookies ?? false, 900), csrfCookie(issued.csrf, options.secureCookies ?? false)]);
+        const workspace = existing?.user_id ? await currentWorkspace(db, existing.user_id) : undefined;
+        response.end(JSON.stringify({ authenticated: Boolean(existing?.user_id), workspace_id: workspace?.workspace_id ?? null, role: workspace?.role ?? null, csrf: (existing ?? issued)!.csrf }));
+        return;
+      }
+      if (request.method === 'POST' && ['/v1/browser/login', '/v1/browser/logout', '/v1/workspaces'].includes(path.pathname) && !path.search) {
+        const origin = options.origin ?? `http://${request.headers.host}`;
+        if (request.headers.origin !== origin || request.headers.host !== new URL(origin).host) throw new RequestFailure(403, 'origin_invalid');
+        if (request.headers['content-type']?.split(';')[0] !== 'application/json') throw new RequestFailure(400, 'invalid_form');
+        let body = '';
+        for await (const chunk of request) { body += chunk; if (Buffer.byteLength(body) > 10_240) throw new RequestFailure(413, 'hard_limit'); }
+        let input: unknown;
+        try { input = JSON.parse(body); } catch { throw new RequestFailure(400, 'invalid_form'); }
+        if (!input || typeof input !== 'object' || Array.isArray(input)) throw new RequestFailure(400, 'invalid_form');
+        const fields = input as Record<string, unknown>;
+        if (typeof fields.csrf !== 'string') throw new RequestFailure(403, 'csrf_invalid');
+        if (path.pathname === '/v1/browser/login') {
+          if (!options.browserIdentity) throw new RequestFailure(503, 'login_unavailable');
+          if (typeof fields.token !== 'string' || fields.token.length > 8192) throw new RequestFailure(401, 'invalid_identity');
+          // Validate the Abisso session and CSRF before asking the identity provider to verify a token.
+          const preSession = await browserSession(db, request.headers.cookie, request.headers.cookie?.split(';').map(value => value.trim()).find(value => value.startsWith('abisso_csrf=')));
+          if (!preSession || preSession.csrf !== fields.csrf) throw new RequestFailure(403, 'csrf_invalid');
+          const identity = await options.browserIdentity(fields.token);
+          const login = await clerkLogin(db, request.headers.cookie, fields.csrf, identity.subject);
+          response.setHeader('set-cookie', [sessionCookie(login.token, options.secureCookies ?? false), csrfCookie(login.csrf, options.secureCookies ?? false)]);
+          response.end(JSON.stringify({ authenticated: true, workspace_id: (await currentWorkspace(db, login.user_id))?.workspace_id ?? null, csrf: login.csrf }));
+        } else if (path.pathname === '/v1/browser/logout') {
+          const anonymous = await logoutBrowser(db, request.headers.cookie, fields.csrf);
+          response.setHeader('set-cookie', [sessionCookie(anonymous.token, options.secureCookies ?? false, 900), csrfCookie(anonymous.csrf, options.secureCookies ?? false)]);
+          response.end(JSON.stringify({ authenticated: false, workspace_id: null, csrf: anonymous.csrf }));
+        } else {
+          const workspace = await createWorkspace(db, request.headers.cookie, fields.csrf);
+          response.writeHead(201).end(JSON.stringify({ workspace_id: workspace }));
+        }
         return;
       }
       if (request.method === 'GET' && path.pathname === '/v1/live') {

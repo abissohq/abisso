@@ -96,6 +96,12 @@ and removes its own isolated schema; development data is not reset.
 See [the foundation profile](docs/engineering/ingestion-foundation.md) for the
 implemented contract, test boundaries, and deferred work.
 
+Issue #19 adds Clerk browser identity and explicit workspace creation. Configure
+`APP_ORIGIN`, `CLERK_PUBLISHABLE_KEY`, `CLERK_JWT_KEY`, and `CLERK_ISSUER`,
+then open `/sign-in`. See [browser and workspace notes](docs/engineering/browser-workspace.md)
+for the required Clerk session token audience, routes, authority boundary, and
+verification path.
+
 Issue #4 adds browser sign-in and session-start Live. After `pnpm dev`, open
 [Live](http://127.0.0.1:3001), use **Local synthetic sign in**, and submit the two
 login forms. Run `pnpm demo:start` in another terminal, then click **Reread Live**
