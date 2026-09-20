@@ -16,6 +16,8 @@
     "worker": "node apps/worker/main.ts",
     "demo:capability": "node tooling/demo.ts",
     "typecheck": "tsc",
+    "check:dependencies": "node tooling/check-dependencies.ts",
+    "test:dependencies": "node --test tests/dependency-direction.test.ts",
     "test:m0:ingestion-foundation": "node tooling/test.ts tests/ingestion-foundation.test.ts",
     "test": "node tooling/test.ts",
     "test:m0:start": "node tooling/test.ts tests/session-start.test.ts",
