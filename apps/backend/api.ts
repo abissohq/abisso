@@ -5,7 +5,7 @@ import type { BrowserIdentityVerifier } from '../../packages/browser/clerk.ts';
 import { clerkBrowserScripts } from '../../packages/browser/clerk.ts';
 import { authorizedWorkspace, readLive } from '../../packages/live/read.ts';
 import { Realtime } from '../../packages/live/realtime.ts';
-import { createServer, type IncomingMessage } from 'node:http';
+import { createServer, type IncomingMessage, type Server } from 'node:http';
 import { gunzipSync } from 'node:zlib';
 import type pg from 'pg';
 import { RequestFailure } from '../../packages/contracts/capability.ts';
@@ -14,8 +14,9 @@ import { limits, parseCanonicalJson } from '../../packages/contracts/json.ts';
 import { purgeExpiredQuarantine } from '../../packages/ingestion/quarantine-repository.ts';
 import { issueEnrollmentCode, redeemEnrollmentCode } from '../../packages/browser/enrollment.ts';
 import { machineSelf } from '../../packages/ingestion/machine-self.ts';
+import { purgeExpiredMachineRefreshRetries, rotateMachineCredential } from '../../packages/ingestion/machine-refresh.ts';
 
-const safeErrorCodes = new Set(['admission_limit', 'csrf_invalid', 'enrollment_invalid', 'hard_limit', 'inactive_authority', 'installation_conflict', 'internal_error', 'invalid_compressed_body', 'invalid_credentials', 'invalid_enrollment', 'invalid_form', 'invalid_identity', 'invalid_json', 'login_invalid', 'login_unavailable', 'malformed_wrapper', 'membership_conflict', 'not_found', 'origin_invalid', 'realtime_degraded', 'request_expired', 'unauthenticated', 'unsupported_encoding']);
+const safeErrorCodes = new Set(['admission_limit', 'csrf_invalid', 'enrollment_invalid', 'hard_limit', 'inactive_authority', 'installation_conflict', 'internal_error', 'invalid_compressed_body', 'invalid_credentials', 'invalid_enrollment', 'invalid_form', 'invalid_identity', 'invalid_json', 'invalid_refresh', 'login_invalid', 'login_unavailable', 'malformed_wrapper', 'membership_conflict', 'not_found', 'origin_invalid', 'realtime_degraded', 'request_expired', 'unauthenticated', 'unsupported_encoding']);
 
 async function boundedJsonObject(request: IncomingMessage, errorCode: string): Promise<Record<string, unknown>> {
   if (request.headers['content-type']?.split(';')[0] !== 'application/json') throw new RequestFailure(400, errorCode);
@@ -25,6 +26,31 @@ async function boundedJsonObject(request: IncomingMessage, errorCode: string): P
   try { input = JSON.parse(body); } catch { throw new RequestFailure(400, errorCode); }
   if (!input || typeof input !== 'object' || Array.isArray(input)) throw new RequestFailure(400, errorCode);
   return input as Record<string, unknown>;
+}
+
+async function boundedRefreshBody(request: IncomingMessage) {
+  if (request.headers['content-type']?.split(';')[0] !== 'application/json') throw new RequestFailure(400, 'invalid_refresh');
+  const chunks: Buffer[] = [];
+  let bytes = 0;
+  for await (const chunk of request) {
+    const buffer = Buffer.isBuffer(chunk) ? chunk : Buffer.from(chunk);
+    bytes += buffer.length;
+    if (bytes > 2048) throw new RequestFailure(413, 'hard_limit');
+    chunks.push(buffer);
+  }
+  const rawBody = Buffer.concat(chunks);
+  let bodyText: string | null = null;
+  try { bodyText = new TextDecoder('utf-8', { fatal: true }).decode(rawBody); }
+  catch { /* Rotation decides whether malformed reuse revokes authority. */ }
+  return { rawBody, bodyText };
+}
+
+function scheduleCleanup(server: Server, intervalMs: number, task: () => Promise<void>, failureCode: string) {
+  const run = () => { void task().catch(() => { console.error(failureCode); }); };
+  const timer = setInterval(run, intervalMs);
+  timer.unref();
+  server.on('listening', run);
+  server.on('close', () => clearInterval(timer));
 }
 
 export function createApi(db: pg.Pool, options: { environment?: string; origin?: string; secureCookies?: boolean; browserIdentity?: BrowserIdentityVerifier; clerkPublishableKey?: string; diagnosticLog?: (line: string) => void; refreshHashKey?: string } = {}) {
@@ -81,6 +107,14 @@ export function createApi(db: pg.Pool, options: { environment?: string; origin?:
         if (!options.refreshHashKey) throw new RequestFailure(503, 'internal_error');
         const result = await redeemEnrollmentCode(db, input, options.refreshHashKey);
         response.end(JSON.stringify(result));
+        return;
+      }
+      if (request.method === 'POST' && path.pathname === '/v1/machines/refresh' && !path.search) {
+        if (request.headers.cookie || request.headers.origin) throw new RequestFailure(403, 'invalid_refresh');
+        const body = await boundedRefreshBody(request);
+        if (!options.refreshHashKey) throw new RequestFailure(503, 'internal_error');
+        response.end(JSON.stringify(await rotateMachineCredential(db, request.headers.authorization,
+          body.rawBody, body.bodyText, options.refreshHashKey, correlationId)));
         return;
       }
       if (request.method === 'GET' && path.pathname === '/v1/machines/self' && !path.search) {
@@ -220,12 +254,10 @@ export function createApi(db: pg.Pool, options: { environment?: string; origin?:
   };
   server.on('listening', () => realtime.start());
   server.on('close', () => { void realtime.stop(); });
+  scheduleCleanup(server, 30_000,
+    () => purgeExpiredMachineRefreshRetries(db), 'machine_refresh_cleanup_failed');
   if (['development', 'test'].includes(options.environment ?? '')) {
-    const purge = () => { void purgeExpiredQuarantine(db).catch(() => { console.error('quarantine_cleanup_failed'); }); };
-    const cleanup = setInterval(purge, 60_000);
-    cleanup.unref();
-    server.on('listening', purge);
-    server.on('close', () => clearInterval(cleanup));
+    scheduleCleanup(server, 60_000, () => purgeExpiredQuarantine(db), 'quarantine_cleanup_failed');
   }
   return server;
 }
