@@ -28,6 +28,23 @@ async function boundedJsonObject(request: IncomingMessage, errorCode: string): P
   return input as Record<string, unknown>;
 }
 
+async function boundedRefreshBody(request: IncomingMessage) {
+  if (request.headers['content-type']?.split(';')[0] !== 'application/json') throw new RequestFailure(400, 'invalid_refresh');
+  const chunks: Buffer[] = [];
+  let bytes = 0;
+  for await (const chunk of request) {
+    const buffer = Buffer.isBuffer(chunk) ? chunk : Buffer.from(chunk);
+    bytes += buffer.length;
+    if (bytes > 2048) throw new RequestFailure(413, 'hard_limit');
+    chunks.push(buffer);
+  }
+  const rawBody = Buffer.concat(chunks);
+  let bodyText: string | null = null;
+  try { bodyText = new TextDecoder('utf-8', { fatal: true }).decode(rawBody); }
+  catch { /* Rotation decides whether malformed reuse revokes authority. */ }
+  return { rawBody, bodyText };
+}
+
 function scheduleCleanup(server: Server, intervalMs: number, task: () => Promise<void>, failureCode: string) {
   const run = () => { void task().catch(() => { console.error(failureCode); }); };
   const timer = setInterval(run, intervalMs);
@@ -36,7 +53,7 @@ function scheduleCleanup(server: Server, intervalMs: number, task: () => Promise
   server.on('close', () => clearInterval(timer));
 }
 
-export function createApi(db: pg.Pool, options: { environment?: string; origin?: string; secureCookies?: boolean; browserIdentity?: BrowserIdentityVerifier; clerkPublishableKey?: string; diagnosticLog?: (line: string) => void; refreshHashKey?: string; now?: () => Date } = {}) {
+export function createApi(db: pg.Pool, options: { environment?: string; origin?: string; secureCookies?: boolean; browserIdentity?: BrowserIdentityVerifier; clerkPublishableKey?: string; diagnosticLog?: (line: string) => void; refreshHashKey?: string } = {}) {
   let ingesting = 0;
   const realtime = new Realtime(db);
   const server = createServer(async (request, response) => {
@@ -94,10 +111,10 @@ export function createApi(db: pg.Pool, options: { environment?: string; origin?:
       }
       if (request.method === 'POST' && path.pathname === '/v1/machines/refresh' && !path.search) {
         if (request.headers.cookie || request.headers.origin) throw new RequestFailure(403, 'invalid_refresh');
-        const input = await boundedJsonObject(request, 'invalid_refresh');
+        const body = await boundedRefreshBody(request);
         if (!options.refreshHashKey) throw new RequestFailure(503, 'internal_error');
-        response.end(JSON.stringify(await rotateMachineCredential(db, request.headers.authorization, input,
-          options.refreshHashKey, options.now?.() ?? new Date())));
+        response.end(JSON.stringify(await rotateMachineCredential(db, request.headers.authorization,
+          body.rawBody, body.bodyText, options.refreshHashKey, correlationId)));
         return;
       }
       if (request.method === 'GET' && path.pathname === '/v1/machines/self' && !path.search) {
@@ -238,7 +255,7 @@ export function createApi(db: pg.Pool, options: { environment?: string; origin?:
   server.on('listening', () => realtime.start());
   server.on('close', () => { void realtime.stop(); });
   scheduleCleanup(server, 30_000,
-    () => purgeExpiredMachineRefreshRetries(db, options.now?.() ?? new Date()), 'machine_refresh_cleanup_failed');
+    () => purgeExpiredMachineRefreshRetries(db), 'machine_refresh_cleanup_failed');
   if (['development', 'test'].includes(options.environment ?? '')) {
     scheduleCleanup(server, 60_000, () => purgeExpiredQuarantine(db), 'quarantine_cleanup_failed');
   }

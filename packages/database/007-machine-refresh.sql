@@ -17,6 +17,10 @@ ALTER TABLE machine_refresh_credentials ADD CONSTRAINT complete_refresh_retry_me
     AND retry_request_id IS NOT NULL AND retry_request_digest IS NOT NULL)
 );
 
+CREATE FUNCTION machine_credential_clock() RETURNS timestamptz LANGUAGE sql VOLATILE AS $$
+  SELECT clock_timestamp();
+$$;
+
 -- This domain-separated marker is not an active credential verifier. It retains
 -- only enough keyed information to map a late reused bearer to its family after
 -- the predecessor credential and its retry metadata have been removed.
@@ -32,13 +36,29 @@ CREATE INDEX refresh_reuse_marker_family ON machine_refresh_reuse_markers (famil
 CREATE TABLE machine_credential_audit (
   id bigint GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
   workspace_id uuid NOT NULL REFERENCES workspaces,
-  machine_id uuid NOT NULL REFERENCES machines,
+  actor_type text NOT NULL CHECK (actor_type = 'machine'),
+  actor_id uuid NOT NULL REFERENCES machines,
   action text NOT NULL CHECK (action IN ('machine.refresh_rotated', 'machine.refresh_family_revoked')),
-  reason text NOT NULL CHECK (reason IN ('authorized_refresh', 'credential_expired', 'credential_reuse', 'inactive_authority')),
-  audit_id uuid NOT NULL,
-  presented_request_id uuid,
-  generation integer NOT NULL CHECK (generation >= 0),
-  recorded_at timestamptz NOT NULL
+  target_type text NOT NULL CHECK (target_type = 'machine'),
+  target_id uuid NOT NULL REFERENCES machines,
+  result text NOT NULL CHECK (result IN ('success', 'rejected')),
+  reason text NOT NULL CHECK (reason IN ('authorized_refresh', 'credential_expired', 'credential_reuse', 'credential_revoked', 'inactive_authority')),
+  server_request_id uuid NOT NULL,
+  client_rotation_request_id uuid,
+  before_generation integer NOT NULL CHECK (before_generation >= 0),
+  after_generation integer NOT NULL CHECK (after_generation >= 0),
+  before_family_revoked boolean NOT NULL,
+  after_family_revoked boolean NOT NULL,
+  recorded_at timestamptz NOT NULL,
+  CHECK (actor_id = target_id),
+  CHECK (
+    (action = 'machine.refresh_rotated' AND result = 'success' AND reason = 'authorized_refresh'
+      AND after_generation = before_generation + 1
+      AND NOT before_family_revoked AND NOT after_family_revoked)
+    OR
+    (action = 'machine.refresh_family_revoked' AND result = 'rejected' AND reason <> 'authorized_refresh'
+      AND after_generation = before_generation AND after_family_revoked)
+  )
 );
 CREATE FUNCTION forbid_machine_credential_audit_change() RETURNS trigger LANGUAGE plpgsql AS $$
 BEGIN RAISE EXCEPTION 'immutable_audit'; END;
