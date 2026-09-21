@@ -5,7 +5,7 @@ import { once } from 'node:events';
 import pg from 'pg';
 import { createApi } from '../apps/backend/api.ts';
 import { migrate } from '../packages/database/database.ts';
-import { purgeExpiredMachineRefreshRetries } from '../packages/ingestion/machine-refresh.ts';
+import { purgeExpiredMachineRefreshRetries, rotateMachineCredential } from '../packages/ingestion/machine-refresh.ts';
 
 const admin = new pg.Pool({ connectionString: process.env.TEST_DATABASE_URL });
 const hashKey = 'test-refresh-hash-key-at-least-thirty-two-bytes';
@@ -15,13 +15,16 @@ let server: ReturnType<typeof createApi>;
 let origin: string;
 let now: Date;
 let diagnosticLines: string[];
+let gatedClockInstalled: boolean;
 
 beforeEach(async () => {
   schema = `test_${randomUUID().replaceAll('-', '')}`;
   await admin.query(`CREATE SCHEMA ${schema}`);
-  db = new pg.Pool({ connectionString: process.env.TEST_DATABASE_URL, options: `-c search_path=${schema}` });
+  db = new pg.Pool({ connectionString: process.env.TEST_DATABASE_URL, options: `-c search_path=${schema}`,
+    application_name: schema });
   await migrate(db);
   now = new Date();
+  gatedClockInstalled = false;
   await db.query('CREATE TABLE machine_credential_test_clock (value timestamptz NOT NULL)');
   await db.query('INSERT INTO machine_credential_test_clock VALUES ($1)', [now]);
   await db.query(`CREATE OR REPLACE FUNCTION machine_credential_clock() RETURNS timestamptz LANGUAGE sql STABLE AS $$
@@ -47,6 +50,81 @@ after(() => admin.end());
 async function setDatabaseNow(value: Date) {
   now = value;
   await db.query('UPDATE machine_credential_test_clock SET value=$1', [value]);
+}
+
+let nextClockGateKey = 4_823_000;
+
+async function clockGate() {
+  const key = nextClockGateKey++;
+  if (!gatedClockInstalled) {
+    await db.query('ALTER TABLE machine_credential_test_clock ADD COLUMN gate_key bigint');
+    await db.query(`CREATE OR REPLACE FUNCTION machine_credential_clock() RETURNS timestamptz LANGUAGE plpgsql VOLATILE AS $$
+      DECLARE result timestamptz; gate bigint;
+      BEGIN
+        SELECT value,gate_key INTO result,gate FROM machine_credential_test_clock;
+        IF gate IS NOT NULL THEN PERFORM pg_advisory_xact_lock(gate); END IF;
+        RETURN result;
+      END
+    $$`);
+    gatedClockInstalled = true;
+  }
+  const client = await db.connect();
+  await client.query('SELECT pg_advisory_lock($1)', [key]);
+  await db.query('UPDATE machine_credential_test_clock SET gate_key=$1', [key]);
+  let held = true;
+  return {
+    async release() {
+      if (!held) return;
+      await client.query('SELECT pg_advisory_unlock($1)', [key]);
+      held = false;
+    },
+    async close() {
+      if (held) await client.query('SELECT pg_advisory_unlock($1)', [key]);
+      client.release();
+    },
+  };
+}
+
+async function waitForRefreshLock(predicate: (query: string) => boolean) {
+  for (let attempt = 0; attempt < 200; attempt++) {
+    const activity = await db.query(`SELECT query FROM pg_stat_activity
+      WHERE application_name=$1 AND wait_event_type='Lock'`, [schema]);
+    if (activity.rows.some(row => predicate(row.query))) return;
+    await new Promise(resolve => setTimeout(resolve, 5));
+  }
+  assert.fail('refresh_lock_wait_not_observed');
+}
+
+function deferred() {
+  let resolve!: () => void;
+  return { promise: new Promise<void>(accept => { resolve = accept; }), resolve };
+}
+
+function pausePoolAfterQuery(match: (query: string) => boolean, reached: ReturnType<typeof deferred>,
+  resume: ReturnType<typeof deferred>) {
+  return {
+    async connect() {
+      const client = await db.connect();
+      let paused = false;
+      return new Proxy(client, {
+        get(target, property) {
+          if (property !== 'query') {
+            const value = Reflect.get(target, property, target);
+            return typeof value === 'function' ? value.bind(target) : value;
+          }
+          return async (...args: unknown[]) => {
+            const result = await (target.query as Function).apply(target, args);
+            if (!paused && match(String(args[0]))) {
+              paused = true;
+              reached.resolve();
+              await resume.promise;
+            }
+            return result;
+          };
+        },
+      });
+    },
+  } as unknown as pg.Pool;
 }
 
 async function enrolledMachine() {
@@ -139,6 +217,48 @@ test('legal noncanonical JSON spelling is valid when replayed byte-for-byte', as
   assert.equal(retry.status, 200);
   assert.equal((await retry.json() as { refresh_token: string }).refresh_token,
     (await first.json() as { refresh_token: string }).refresh_token);
+});
+
+test('uppercase UUID identity preserves byte-exact retry semantics', async () => {
+  const uppercaseRequest = await enrolledMachine();
+  const uppercaseRequestId = 'AAAAAAAA-AAAA-4AAA-8AAA-AAAAAAAAAAAA';
+  const uppercaseRequestBody = JSON.stringify({ installation_id: uppercaseRequest.installationId,
+    generation: 0, request_id: uppercaseRequestId });
+  const firstRequest = await rawRefresh(uppercaseRequest.refreshToken, uppercaseRequestBody);
+  const retryRequest = await rawRefresh(uppercaseRequest.refreshToken, uppercaseRequestBody);
+  assert.equal(firstRequest.status, 200);
+  assert.equal(retryRequest.status, 200);
+  assert.equal((await retryRequest.json() as { refresh_token: string }).refresh_token,
+    (await firstRequest.json() as { refresh_token: string }).refresh_token);
+  const canonicalRequestId = uppercaseRequestId.toLowerCase();
+  const requestMetadata = (await db.query(`SELECT retry_installation_id,retry_request_id
+    FROM machine_refresh_credentials WHERE machine_id=$1 AND generation=0`, [uppercaseRequest.machineId])).rows[0];
+  assert.deepEqual(requestMetadata, {
+    retry_installation_id: uppercaseRequest.installationId,
+    retry_request_id: canonicalRequestId,
+  });
+  assert.equal((await db.query(`SELECT client_rotation_request_id FROM machine_credential_audit
+    WHERE actor_id=$1 AND action='machine.refresh_rotated'`, [uppercaseRequest.machineId])).rows[0].client_rotation_request_id,
+  canonicalRequestId);
+
+  const uppercaseInstallation = await enrolledMachine();
+  const uppercaseInstallationBody = JSON.stringify({ installation_id: uppercaseInstallation.installationId.toUpperCase(),
+    generation: 0, request_id: randomUUID() });
+  const firstInstallation = await rawRefresh(uppercaseInstallation.refreshToken, uppercaseInstallationBody);
+  const retryInstallation = await rawRefresh(uppercaseInstallation.refreshToken, uppercaseInstallationBody);
+  assert.equal(firstInstallation.status, 200);
+  assert.equal(retryInstallation.status, 200);
+  assert.equal((await retryInstallation.json() as { refresh_token: string }).refresh_token,
+    (await firstInstallation.json() as { refresh_token: string }).refresh_token);
+
+  const changedCase = await enrolledMachine();
+  const original = JSON.stringify({ installation_id: changedCase.installationId,
+    generation: 0, request_id: uppercaseRequestId });
+  const changed = JSON.stringify({ installation_id: changedCase.installationId,
+    generation: 0, request_id: canonicalRequestId });
+  assert.equal((await rawRefresh(changedCase.refreshToken, original)).status, 200);
+  assert.equal((await rawRefresh(changedCase.refreshToken, changed)).status, 401);
+  await assertRefreshFamilyRevoked(changedCase.machineId);
 });
 
 test('refresh body preserves the 2,048-byte transport boundary', async () => {
@@ -282,6 +402,125 @@ test('concurrent byte-identical retries return one refresh successor', async () 
   assert.deepEqual(responses.map(response => response.status), [200, 200]);
   const results = await Promise.all(responses.map(response => response.json() as Promise<{ refresh_token: string }>));
   assert.equal(results[0].refresh_token, results[1].refresh_token);
+});
+
+test('family-first locking makes direct and reuse-marker predecessor races revoke without deadlock', async () => {
+  for (const predecessor of ['retained-row', 'reuse-marker'] as const) {
+    const machine = await enrolledMachine();
+    const first = await refresh(machine.refreshToken, {
+      installation_id: machine.installationId, generation: 0, request_id: randomUUID(),
+    });
+    assert.equal(first.status, 200, predecessor);
+    const issued = await first.json() as { refresh_token: string };
+    if (predecessor === 'reuse-marker') {
+      await setDatabaseNow(new Date(now.getTime() + 30_001));
+      await purgeExpiredMachineRefreshRetries(db);
+      assert.equal((await db.query(`SELECT count(*)::integer AS n FROM machine_refresh_credentials
+        WHERE machine_id=$1 AND generation=0`, [machine.machineId])).rows[0].n, 0);
+    }
+
+    const gate = await clockGate();
+    try {
+      const reuse = refresh(machine.refreshToken, {
+        installation_id: machine.installationId, generation: 0, request_id: randomUUID(),
+      });
+      await waitForRefreshLock(query => query.includes('machine_credential_clock() AS now'));
+      const current = refresh(issued.refresh_token, {
+        installation_id: machine.installationId, generation: 1, request_id: randomUUID(),
+      });
+      await waitForRefreshLock(query => !query.includes('machine_credential_clock() AS now')
+        && (query.includes('machine_refresh_credentials') || query.includes('FROM machines m')));
+      await gate.release();
+      const responses = await Promise.all([reuse, current]);
+      assert.deepEqual(responses.map(response => response.status), [401, 401], predecessor);
+      assert(!responses.some(response => response.status === 500), predecessor);
+      await assertRefreshFamilyRevoked(machine.machineId);
+      assert.equal((await db.query(`SELECT count(*)::integer AS n FROM machine_refresh_credentials
+        WHERE machine_id=$1 AND generation>1 AND NOT revoked`, [machine.machineId])).rows[0].n, 0, predecessor);
+      assert((await db.query(`SELECT count(*)::integer AS n FROM machine_credential_audit
+        WHERE actor_id=$1 AND action='machine.refresh_family_revoked'`, [machine.machineId])).rows[0].n >= 1,
+      predecessor);
+    } finally {
+      await gate.close();
+    }
+  }
+});
+
+test('a waiting marker request locks a newly committed successor before revocation', async () => {
+  const machine = await enrolledMachine();
+  const first = await refresh(machine.refreshToken, {
+    installation_id: machine.installationId, generation: 0, request_id: randomUUID(),
+  });
+  const issued = await first.json() as { refresh_token: string };
+  await setDatabaseNow(new Date(now.getTime() + 30_001));
+  await purgeExpiredMachineRefreshRetries(db);
+
+  const currentGate = await clockGate();
+  let markerGate: Awaited<ReturnType<typeof clockGate>> | undefined;
+  try {
+    const current = refresh(issued.refresh_token, {
+      installation_id: machine.installationId, generation: 1, request_id: randomUUID(),
+    });
+    await waitForRefreshLock(query => query.includes('machine_credential_clock() AS now'));
+    markerGate = await clockGate();
+    const lateReuse = refresh(machine.refreshToken, {
+      installation_id: machine.installationId, generation: 0, request_id: randomUUID(),
+    });
+    await waitForRefreshLock(query => query.includes('machine_refresh_credentials')
+      && query.includes('ORDER BY generation FOR UPDATE'));
+    await currentGate.release();
+    assert.equal((await current).status, 200);
+    await waitForRefreshLock(query => query.includes('machine_credential_clock() AS now'));
+
+    const probe = await db.connect();
+    try {
+      await probe.query('BEGIN');
+      await assert.rejects(probe.query(`SELECT 1 FROM machine_refresh_credentials
+        WHERE machine_id=$1 AND generation=2 FOR UPDATE NOWAIT`, [machine.machineId]),
+      error => (error as { code?: string }).code === '55P03');
+      await probe.query('ROLLBACK');
+    } finally {
+      probe.release();
+    }
+
+    await markerGate.release();
+    assert.equal((await lateReuse).status, 401);
+    await assertRefreshFamilyRevoked(machine.machineId);
+    assert.equal((await db.query(`SELECT revoked FROM machine_refresh_credentials
+      WHERE machine_id=$1 AND generation=2`, [machine.machineId])).rows[0].revoked, true);
+  } finally {
+    await currentGate.close();
+    if (markerGate) await markerGate.close();
+  }
+});
+
+test('cleanup between family resolution and locking falls back to the reuse marker', async () => {
+  const machine = await enrolledMachine();
+  const firstRequest = { installation_id: machine.installationId, generation: 0, request_id: randomUUID() };
+  const first = await refresh(machine.refreshToken, firstRequest);
+  const issued = await first.json() as { refresh_token: string };
+  await setDatabaseNow(new Date(now.getTime() + 30_001));
+
+  const reached = deferred();
+  const resume = deferred();
+  const body = Buffer.from(JSON.stringify(firstRequest));
+  const serverRequestId = randomUUID();
+  const pending = rotateMachineCredential(pausePoolAfterQuery(
+    query => query.includes('SELECT family_id,machine_id FROM machine_refresh_credentials'), reached, resume),
+  `Bearer ${machine.refreshToken}`, body, body.toString(), hashKey, serverRequestId);
+  await reached.promise;
+  await purgeExpiredMachineRefreshRetries(db);
+  assert.equal((await db.query(`SELECT count(*)::integer AS n FROM machine_refresh_credentials
+    WHERE machine_id=$1 AND generation=0`, [machine.machineId])).rows[0].n, 0);
+  resume.resolve();
+  await assert.rejects(pending, error => (error as { code?: string }).code === 'invalid_credentials');
+  await assertRefreshFamilyRevoked(machine.machineId);
+  assert.equal((await refresh(issued.refresh_token, {
+    installation_id: machine.installationId, generation: 1, request_id: randomUUID(),
+  })).status, 401);
+  const audit = (await db.query(`SELECT reason FROM machine_credential_audit
+    WHERE actor_id=$1 AND server_request_id=$2`, [machine.machineId, serverRequestId])).rows[0];
+  assert.equal(audit.reason, 'credential_reuse');
 });
 
 test('changed installation or generation on predecessor reuse revokes each family', async () => {

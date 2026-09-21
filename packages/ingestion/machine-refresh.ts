@@ -35,7 +35,11 @@ function parseRequest(input: Record<string, unknown>): RefreshRequest {
     || typeof input.generation !== 'number' || !Number.isSafeInteger(input.generation) || input.generation < 0) {
     throw new RequestFailure(400, 'invalid_refresh');
   }
-  return input as RefreshRequest;
+  return {
+    installation_id: input.installation_id.toLowerCase(),
+    generation: input.generation,
+    request_id: input.request_id.toLowerCase(),
+  };
 }
 
 export async function rotateMachineCredential(db: pg.Pool, authorization: string | undefined,
@@ -44,15 +48,30 @@ export async function rotateMachineCredential(db: pg.Pool, authorization: string
   if (refreshHashKey.length < 32) throw new RequestFailure(503, 'internal_error');
   if (!predecessor) throw new RequestFailure(401, 'invalid_credentials');
   const exactRequestDigest = requestDigest(rawBody);
+  const presentedDigest = keyedDigest(refreshHashKey, predecessor);
+  const presentedReuseMarker = keyedReuseMarker(refreshHashKey, predecessor);
   const result = await transaction(db, async client => {
-    let refreshCredential = (await client.query(`SELECT * FROM machine_refresh_credentials
-      WHERE digest=$1 FOR UPDATE`,
-    [keyedDigest(refreshHashKey, predecessor)])).rows[0];
+    let resolution = (await client.query(`SELECT family_id,machine_id FROM machine_refresh_credentials
+      WHERE digest=$1`, [presentedDigest])).rows[0];
+    if (!resolution) {
+      resolution = (await client.query(`SELECT family_id,machine_id FROM machine_refresh_reuse_markers
+        WHERE marker=$1`, [presentedReuseMarker])).rows[0];
+    }
+    if (!resolution) throw new RequestFailure(401, 'invalid_credentials');
+
+    const lockFamily = () => client.query(`SELECT * FROM machine_refresh_credentials
+      WHERE family_id=$1 ORDER BY generation FOR UPDATE`, [resolution.family_id]);
+    await lockFamily();
+    const lockedFamily = (await lockFamily()).rows;
+    let refreshCredential = lockedFamily.find(row => row.digest === presentedDigest);
     let lateReuse = false;
     if (!refreshCredential) {
-      refreshCredential = (await client.query(`SELECT * FROM machine_refresh_reuse_markers WHERE marker=$1`,
-      [keyedReuseMarker(refreshHashKey, predecessor)])).rows[0];
-      if (!refreshCredential) throw new RequestFailure(401, 'invalid_credentials');
+      const marker = (await client.query(`SELECT * FROM machine_refresh_reuse_markers WHERE marker=$1`,
+        [presentedReuseMarker])).rows[0];
+      if (!marker || marker.family_id !== resolution.family_id || marker.machine_id !== resolution.machine_id) {
+        throw new RequestFailure(401, 'invalid_credentials');
+      }
+      refreshCredential = marker;
       lateReuse = true;
     }
     const authority = (await client.query(`SELECT m.installation_id, m.workspace_id, m.active AS machine_active,
