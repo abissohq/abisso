@@ -87,8 +87,8 @@ export async function redeemEnrollmentCode(db: pg.Pool, input: Record<string, un
     }
     await client.query(`INSERT INTO machine_credentials (digest,machine_id,audience,expires_at)
       VALUES ($1,$2,'machine:access',clock_timestamp() + interval '15 minutes')`, [digest(accessToken), machineId]);
-    await client.query(`INSERT INTO machine_refresh_credentials (digest,machine_id,expires_at)
-      VALUES ($1,$2,clock_timestamp() + interval '90 days')`, [refreshDigest, machineId]);
+    await client.query(`INSERT INTO machine_refresh_credentials (digest,machine_id,expires_at,family_id,generation)
+      VALUES ($1,$2,clock_timestamp() + interval '90 days',$2,0)`, [refreshDigest, machineId]);
     await client.query(`INSERT INTO machine_audit
       (workspace_id,actor_type,actor_id,action,target_type,target_id,result,reason,before_state,after_state,request_id)
       VALUES ($1,'user',$2,'machine.registered','machine',$3,'success','authorized_enrollment','unregistered','registered',$4)`,
