@@ -523,6 +523,101 @@ test('cleanup between family resolution and locking falls back to the reuse mark
   assert.equal(audit.reason, 'credential_reuse');
 });
 
+test('global retry cleanup and reuse serialize without a refresh deadlock', async () => {
+  const machine = await enrolledMachine();
+  const predecessorRequest = {
+    installation_id: machine.installationId, generation: 0, request_id: randomUUID(),
+  };
+  const first = await refresh(machine.refreshToken, predecessorRequest);
+  assert.equal(first.status, 200);
+  const issued = await first.json() as { access_token: string; refresh_token: string };
+
+  await db.query('DELETE FROM machine_refresh_credentials WHERE machine_id=$1', [machine.machineId]);
+  const consumedAt = new Date(now.getTime() - 31_000);
+  const retryExpiredAt = new Date(now.getTime() - 1);
+  const expiresAt = new Date(now.getTime() + 90 * 24 * 60 * 60_000);
+  const generationTwoToken = randomBytes(32).toString('base64url');
+  const digest = (token: string) => createHmac('sha256', hashKey).update(token).digest('hex');
+  await db.query(`INSERT INTO machine_refresh_credentials
+    (digest,machine_id,expires_at,family_id,generation,consumed_at,retry_expires_at,
+      retry_installation_id,retry_request_id,retry_request_digest)
+    VALUES
+      ($1,$2,$3,$2,1,$4,$5,$6,$7,$8),
+      ($9,$2,$3,$2,0,$4,$5,$6,$10,$11),
+      ($12,$2,$3,$2,2,NULL,NULL,NULL,NULL,NULL)`,
+  [digest(issued.refresh_token), machine.machineId, expiresAt, consumedAt, retryExpiredAt,
+    machine.installationId, randomUUID(), createHash('sha256').update('generation-one').digest('hex'),
+    digest(machine.refreshToken), randomUUID(), createHash('sha256').update('generation-zero').digest('hex'),
+    digest(generationTwoToken)]);
+  assert.deepEqual((await db.query(`SELECT generation FROM machine_refresh_credentials
+    WHERE family_id=$1 ORDER BY ctid`, [machine.machineId])).rows.map(row => row.generation), [1, 0, 2]);
+
+  const gateKey = nextClockGateKey++;
+  await db.query(`CREATE FUNCTION pause_reverse_refresh_cleanup() RETURNS trigger LANGUAGE plpgsql AS $$
+    BEGIN
+      IF OLD.generation = 1 THEN PERFORM pg_advisory_xact_lock(${gateKey}); END IF;
+      RETURN OLD;
+    END
+  $$`);
+  await db.query(`CREATE TRIGGER pause_reverse_refresh_cleanup BEFORE DELETE ON machine_refresh_credentials
+    FOR EACH ROW EXECUTE FUNCTION pause_reverse_refresh_cleanup()`);
+  const gate = await db.connect();
+  await gate.query('SELECT pg_advisory_lock($1)', [gateKey]);
+  let released = false;
+  try {
+    const cleanup = purgeExpiredMachineRefreshRetries(db);
+    await waitForRefreshLock(query => query.includes('DELETE FROM machine_refresh_credentials'));
+    const reuse = refresh(machine.refreshToken, {
+      installation_id: machine.installationId, generation: 0, request_id: randomUUID(),
+    });
+    await waitForRefreshLock(query => query.includes('ORDER BY generation FOR UPDATE'));
+    await gate.query('SELECT pg_advisory_unlock($1)', [gateKey]);
+    released = true;
+
+    const [cleanupResult, reuseResponse] = await Promise.all([
+      cleanup.then(() => null, error => error as { code?: string }),
+      reuse,
+    ]);
+    assert.equal(cleanupResult?.code, undefined);
+    assert.notEqual(reuseResponse.status, 500);
+    assert.equal(reuseResponse.status, 401);
+    await assertRefreshFamilyRevoked(machine.machineId);
+    const audit = (await db.query(`SELECT reason FROM machine_credential_audit
+      WHERE actor_id=$1 AND action='machine.refresh_family_revoked'`, [machine.machineId])).rows.at(-1);
+    assert.equal(audit.reason, 'credential_reuse');
+  } finally {
+    if (!released) await gate.query('SELECT pg_advisory_unlock($1)', [gateKey]);
+    gate.release();
+  }
+});
+
+test('global retry cleanup removes expired generations across families', async () => {
+  const machines = await Promise.all([enrolledMachine(), enrolledMachine()]);
+  for (const machine of machines) {
+    const first = await refresh(machine.refreshToken, {
+      installation_id: machine.installationId, generation: 0, request_id: randomUUID(),
+    });
+    assert.equal(first.status, 200);
+    const generationOne = await first.json() as { refresh_token: string };
+    const second = await refresh(generationOne.refresh_token, {
+      installation_id: machine.installationId, generation: 1, request_id: randomUUID(),
+    });
+    assert.equal(second.status, 200);
+  }
+  await setDatabaseNow(new Date(now.getTime() + 30_001));
+
+  await purgeExpiredMachineRefreshRetries(db);
+  await purgeExpiredMachineRefreshRetries(db);
+
+  for (const machine of machines) {
+    const remaining = (await db.query(`SELECT generation,consumed_at FROM machine_refresh_credentials
+      WHERE machine_id=$1 ORDER BY generation`, [machine.machineId])).rows;
+    assert.deepEqual(remaining, [{ generation: 2, consumed_at: null }]);
+    assert.equal((await db.query(`SELECT count(*)::integer AS n FROM machine_refresh_reuse_markers
+      WHERE machine_id=$1`, [machine.machineId])).rows[0].n, 2);
+  }
+});
+
 test('changed installation or generation on predecessor reuse revokes each family', async () => {
   for (const changed of ['installation', 'generation'] as const) {
     const machine = await enrolledMachine();

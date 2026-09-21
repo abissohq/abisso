@@ -183,6 +183,13 @@ export async function rotateMachineCredential(db: pg.Pool, authorization: string
 }
 
 export async function purgeExpiredMachineRefreshRetries(db: pg.Pool) {
-  await db.query(`DELETE FROM machine_refresh_credentials
-    WHERE consumed_at IS NOT NULL AND retry_expires_at < machine_credential_clock()`);
+  await transaction(db, async client => {
+    const cutoff = (await client.query('SELECT machine_credential_clock()::text AS cutoff')).rows[0].cutoff as string;
+    const expired = (await client.query(`SELECT digest FROM machine_refresh_credentials
+      WHERE consumed_at IS NOT NULL AND retry_expires_at < $1
+      ORDER BY family_id,generation FOR UPDATE`, [cutoff])).rows as { digest: string }[];
+    if (expired.length === 0) return;
+    await client.query('DELETE FROM machine_refresh_credentials WHERE digest=ANY($1::text[])',
+      [expired.map(row => row.digest)]);
+  });
 }
