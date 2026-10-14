@@ -1,8 +1,8 @@
 # Approved portfolio tickets — revision 2
 
-Status: **breakdown and publication approved; ten child tickets published; implementation hold remains in effect**.
+Status: **breakdown and publication approved; ten child tickets published; #50 alone has bounded experiment authorization; #51–#59 remain on hold**.
 
-Prepared with `to-tickets` against the approved scope and primary test seams. Sequence numbers map to the published GitHub issues below. Approval of this breakdown alone does not authorize implementation. No live feasibility experiment has been run during this planning revision.
+Prepared with `to-tickets` against the approved scope and primary test seams. Sequence numbers map to the published GitHub issues below. Approval of this breakdown alone does not authorize implementation. The later #50 preflight stopped before live input; see [evidence and outcome](feasibility-50.md).
 
 ## Breakdown assessment
 
@@ -171,3 +171,7 @@ The parent specification remains [#49](https://github.com/abissohq/abisso/issues
 - 8. [#57: Integrate the proven Codex interval through the safe collector path](https://github.com/abissohq/abisso/issues/57) — blocked by #50, #56; #50 must Pass.
 - 9. [#58: Reproduce offline recovery and truthful collection gaps with fixtures](https://github.com/abissohq/abisso/issues/58) — blocked by #56.
 - 10. [#59: Integrate the frontend, real evidence and recovery walkthrough](https://github.com/abissohq/abisso/issues/59) — blocked by #52, #57, #58.
+
+## Authorization update — 2026-10-14
+
+Only #50 is authorized for its bounded feasibility experiment. Its access precheck found available included usage, but privacy-safe acquisition was not established; it stopped before inference and remains open with `ready-for-human` for that blocker. See [the evidence](feasibility-50.md). This later authorization supersedes the historical blanket hold only for #50; #51–#59 and all feature implementation remain on hold. #57 requires #50 to Pass. The user-authorized parent update resolves the older seven-ticket/status/frontend wording and aligns #49 with `ready-for-human` while keeping it open.

@@ -1,6 +1,6 @@
 # Portfolio readiness plan
 
-Status: scope and primary test seams approved by the user, 2026-10-12. Specification prepared; ten-ticket breakdown approved and published; live experiments and implementation remain on hold. No features implemented.
+Status: scope and primary test seams approved by the user, 2026-10-12. Specification prepared; ten-ticket breakdown approved and published; #50 alone is authorized for a bounded feasibility experiment; #51–#59 remain on hold. The #50 preflight stopped with privacy-safe acquisition unestablished. No features implemented.
 
 ## Purpose and authority
 
@@ -30,7 +30,7 @@ This is a capability inventory, not a complete security or line-by-line code rev
 
 ## Approved delivery sequence
 
-These are approved, published tickets. Execution remains on hold until separately authorized. Full acceptance criteria are in [the revised breakdown](tickets-proposed.md). Scope and primary test seams are unchanged.
+These are approved, published tickets. Only #50 has bounded experiment authorization; #51–#59 remain on hold. Full acceptance criteria are in [the revised breakdown](tickets-proposed.md). Scope and primary test seams are unchanged.
 
 1. **Early live Codex feasibility gate.** No blockers; prioritize first. Prove existing-access execution, content-safe acquisition and lifecycle markers without shared telemetry upload. Pass is required for ticket 8. A blocked gate does not block fixture/UI work, but blocks the real-provider claim and portfolio exit.
 2. **Reproducible fixture-to-Live demo.** No blockers. Show two clearly labeled synthetic sessions through the existing backend and authenticated UI.
@@ -63,7 +63,7 @@ Use the installed repository skills in this order:
 3. `implement` with `tdd`: one approved ticket per slice branch, tests at agreed seams, typecheck and relevant tests, then full suite at completion.
 4. `code-review`: standards and spec review against the slice's portfolio base; satisfy findings before integration.
 
-The numbered slices above map to approved GitHub tickets #50–#59. Scope and primary test seams are approved. Next: separate user authorization before any live feasibility experiment or implementation. The ten approved child tickets are published with native dependencies; publication does not permit execution.
+The numbered slices above map to approved GitHub tickets #50–#59. Scope and primary test seams are approved. Next: resolve #50’s recorded privacy acquisition blocker before any live input; #51–#59 require separate execution authorization. The ten approved child tickets are published with native dependencies; publication does not permit execution.
 
 ## Portfolio-ready exit criteria
 
@@ -105,3 +105,9 @@ No associated PR was found through the #49 cross-reference timeline, the `portfo
 Remaining tracker wording discrepancies: #49 still describes a proposed seven-ticket breakdown awaiting approval and says frontend work belongs in every slice. The later approved ten-ticket breakdown supersedes that sequencing/status text, and explicitly exempts the bounded feasibility experiment from frontend work. #49 also retains `ready-for-agent`; its explicit execution hold and the children's `ready-for-human` state remain authoritative for scheduling. The parent body, label and open status are left unchanged. These are documentation/status discrepancies, not authorization to start work.
 
 This publication includes only the four documents in this directory. It authorizes neither #50's live experiment nor any feature implementation. Future implementation PRs must target `portfolio-ready`.
+
+## #50 authorization and outcome — 2026-10-14
+
+The user authorized correction of #49 and the bounded #50 experiment only. #49 now states the approved ten-ticket breakdown/dependencies, the #50 frontend exception and the continuing holds for #51–#59. It remains open with `ready-for-human`; the tracker discrepancies recorded in the baseline review above are resolved.
+
+See [#50 evidence and Blocked outcome](feasibility-50.md). Installed CLI/authentication and available included access were checked without inference. Privacy-safe acquisition of the mixed JSONL stream was not established, so the live step was not started. #50 remains open for this blocker; #57 still requires an actual Pass. No feature implementation, new purchase, API-key fallback or production specification change was performed.

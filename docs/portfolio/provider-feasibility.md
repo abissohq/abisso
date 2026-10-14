@@ -41,3 +41,7 @@ The credential-free fixture demo uses explicit development/test composition. The
 ## Verdict
 
 Codex is selected for the now-approved tickets. The observations in this assessment are dated 2026-10-12 and have not been refreshed through a live experiment. Real demonstration remains gated on a content-safe acquisition proof, versioned sanitized fixtures, existing included access, authenticated local setup, and the complete privacy/upload seam. Claude Code and all other providers remain outside this milestone. Attention detection and GitHub outcomes remain stretch scope, not core acceptance criteria.
+
+## Follow-up — 2026-10-14
+
+The user authorized the bounded #50 experiment only. Its non-inference preflight confirmed the installed build, ChatGPT authentication and available included usage, but could not establish privacy-safe acquisition of the mixed JSONL interface. The live step was therefore not started. See [#50 evidence and Blocked outcome](feasibility-50.md). This supersedes the earlier unverified allowance snapshot, but does not verify live compatibility or establish a working integration. #51–#59 remain on hold.
