@@ -1,6 +1,6 @@
 # Portfolio milestone: safe local Codex evidence and a reviewer-ready Live experience
 
-Status: approved portfolio scope and primary test seams synthesized with `to-spec`. The ten-ticket breakdown is approved and published as children #50–#59 of #49. Publication does not authorize live experiments or feature implementation. This parent specification does **not** authorize implementation. Portfolio branch only; production specifications retain authority.
+Status: portfolio scope, primary test seams and the ten-ticket breakdown are approved and published as #50–#59. Only #50 is authorized for a bounded feasibility experiment, with stop conditions for spend and privacy. Its preflight stopped with privacy-safe acquisition not established; see [the evidence](feasibility-50.md). #51–#59 remain on execution hold. No feature implementation is authorized. Parent #49 remains open with `ready-for-human`. Production specifications retain authority.
 
 ## Problem Statement
 
@@ -80,4 +80,4 @@ Exit requires a reproducible synthetic demo, a separately labeled real demonstra
 
 Sources: [Codex non-interactive mode](https://learn.chatgpt.com/docs/non-interactive-mode), [Codex authentication](https://learn.chatgpt.com/docs/auth), and the repository's approved portfolio plan and six authoritative specifications. Provider access and interface checks are dated 2026-10-12; no new integration test run is claimed.
 
-The tracker parent #49 retains historical seven-ticket/pending-approval wording and a blanket frontend-per-slice statement. The approved ten-ticket breakdown and its explicit feasibility-experiment exception supersede those planning details; product scope and primary test seams are unchanged. The parent remains open and its label does not lift the execution hold.
+On 2026-10-14, the user authorized updating tracker parent #49 to the approved ten-ticket plan, dependencies and explicit frontend exception for #50. Those tracker discrepancies are resolved without changing substantive requirements. Only #50 has bounded experiment authorization; the other execution holds remain.
